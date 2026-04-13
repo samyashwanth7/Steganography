@@ -5,6 +5,11 @@ The Advanced Steganography Platform is a web-based application designed to hide 
 
 This project focuses solely on **Fast, Serverless-ready Steganography**, discarding unnecessary bloat such as persistent user databases and messaging loops in favor of a lean cryptographic tool ready for instant scaling.
 
+## Live Demo
+The frontend UI is hosted on GitHub Pages: [https://samyashwanth7.github.io/Steganography](https://samyashwanth7.github.io/Steganography)
+
+> **Note**: As GitHub Pages only hosts static files, the cryptographic backend (Python FastAPI) needs to be running locally or hosted on an external server (like Render or Heroku) for the encoding and decoding functionality to work.
+
 ## Features & Core Functionalities
 
 ### 1. Complex Additive Steganography
