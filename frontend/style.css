@@ -1,157 +1,329 @@
 :root {
-  --bg-dark: #0f0f13;
-  --bg-card: #1c1c24;
-  --text-main: #f0f0f0;
-  --text-muted: #a0a0a0;
-  --primary: #ef4444;
-  --primary-glow: rgba(239, 68, 68, 0.5);
-  --accent: #f59e0b;
+  --bg-color: #050505;
+  --panel-bg: rgba(20, 20, 25, 0.6);
+  --panel-border: rgba(255, 255, 255, 0.08);
+  --text-main: #ffffff;
+  --text-muted: #888899;
+  --primary: #6366f1;
+  --secondary: #ec4899;
+  --accent: #10b981;
+  --glow-primary: rgba(99, 102, 241, 0.4);
+  --glow-secondary: rgba(236, 72, 153, 0.4);
 }
 
-* { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', sans-serif; }
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  font-family: 'Outfit', 'Inter', sans-serif;
+}
 
 body {
-  background-color: var(--bg-dark);
+  background-color: var(--bg-color);
   color: var(--text-main);
+  min-height: 100vh;
   display: flex;
   justify-content: center;
   align-items: center;
-  min-height: 100vh;
-  padding: 2rem;
+  overflow: hidden; /* For the canvas background */
 }
 
+/* Three.js Background Canvas */
+#canvas-container {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: -1;
+  pointer-events: none;
+}
+
+/* Glassmorphism Container */
 .container {
-  background: var(--bg-card);
-  padding: 2rem;
-  border-radius: 16px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--panel-border);
+  padding: 2.5rem;
+  border-radius: 24px;
   width: 100%;
-  max-width: 600px;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5), 0 0 20px var(--primary-glow);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  max-width: 650px;
+  box-shadow: 0 30px 60px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255,255,255,0.1);
+  position: relative;
+  z-index: 10;
+  animation: floatUp 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+  opacity: 0;
+  transform: translateY(30px);
+}
+
+@keyframes floatUp {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.header {
+  text-align: center;
+  margin-bottom: 2rem;
 }
 
 h1 {
-  text-align: center;
-  font-size: 2rem;
-  margin-bottom: 0.5rem;
-  background: linear-gradient(90deg, var(--primary), var(--accent));
+  font-size: 2.5rem;
+  font-weight: 700;
+  letter-spacing: -1px;
+  background: linear-gradient(135deg, #fff, #a5b4fc);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
+  margin-bottom: 0.5rem;
 }
 
-p.subtitle {
-  text-align: center;
+.subtitle {
   color: var(--text-muted);
-  margin-bottom: 2rem;
-  font-size: 0.9rem;
+  font-size: 1rem;
+  font-weight: 400;
+  letter-spacing: 0.5px;
 }
 
+/* Animated Gradient Tabs */
 .tabs {
   display: flex;
-  margin-bottom: 1.5rem;
-  background: rgba(0,0,0,0.2);
-  border-radius: 8px;
-  padding: 4px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 12px;
+  padding: 6px;
+  margin-bottom: 2rem;
+  position: relative;
 }
 
 .tab {
   flex: 1;
-  padding: 10px;
   text-align: center;
+  padding: 12px;
   cursor: pointer;
-  border-radius: 6px;
+  border-radius: 8px;
   color: var(--text-muted);
   font-weight: 500;
-  transition: 0.3s;
+  transition: all 0.4s ease;
+  z-index: 2;
 }
 
 .tab.active {
-  background: var(--primary);
-  color: white;
+  color: #fff;
 }
 
-.view { display: none; }
-.view.active { display: block; animation: fadeIn 0.4s ease; }
+/* The moving highlight behind tabs */
+.tab-highlight {
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  width: calc(50% - 6px);
+  background: linear-gradient(90deg, var(--primary), var(--secondary));
+  border-radius: 8px;
+  z-index: 1;
+  transition: transform 0.4s cubic-bezier(0.25, 1, 0.5, 1);
+  box-shadow: 0 4px 15px var(--glow-primary);
+}
+
+#tab-decode.active ~ .tab-highlight {
+  transform: translateX(100%);
+}
+
+.view {
+  display: none;
+  opacity: 0;
+}
+.view.active {
+  display: block;
+  animation: fadeIn 0.5s forwards;
+}
 
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(5px); }
+  from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
+/* Beautiful Dropzone */
 .dropzone {
-  border: 2px dashed rgba(239, 68, 68, 0.4);
-  background: rgba(239, 68, 68, 0.05);
-  padding: 2rem;
+  border: 2px dashed rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.02);
+  padding: 2.5rem 2rem;
   text-align: center;
-  border-radius: 12px;
+  border-radius: 16px;
   cursor: pointer;
-  transition: 0.3s;
-  margin-bottom: 1rem;
+  transition: all 0.3s ease;
+  margin-bottom: 1.5rem;
+  position: relative;
+  overflow: hidden;
+}
+
+.dropzone::before {
+  content: '';
+  position: absolute;
+  top: 0; left: -100%;
+  width: 50%; height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.05), transparent);
+  transition: left 0.5s;
+}
+
+.dropzone:hover::before {
+  left: 150%;
 }
 
 .dropzone:hover {
-  border-color: var(--accent);
-  background: rgba(245, 158, 11, 0.05);
+  border-color: var(--primary);
+  background: rgba(99, 102, 241, 0.05);
+  transform: translateY(-2px);
 }
 
 .dropzone.dragover {
-  border-color: var(--primary);
-  background: rgba(239, 68, 68, 0.15);
+  border-color: var(--secondary);
+  background: rgba(236, 72, 153, 0.1);
+  transform: scale(1.02);
 }
 
+.drop-icon {
+  font-size: 2rem;
+  margin-bottom: 10px;
+  display: block;
+  background: linear-gradient(135deg, var(--primary), var(--secondary));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Modern Inputs */
 .input-group {
-  margin-bottom: 1rem;
+  margin-bottom: 1.5rem;
+  position: relative;
 }
 
 .input-group label {
   display: block;
   font-size: 0.85rem;
-  color: var(--text-muted);
-  margin-bottom: 0.4rem;
+  color: #a5b4fc;
+  margin-bottom: 0.5rem;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-weight: 600;
 }
 
-input, textarea {
+input[type="password"], textarea {
   width: 100%;
-  padding: 12px;
-  border-radius: 8px;
+  padding: 14px 16px;
+  border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(0, 0, 0, 0.2);
+  background: rgba(0, 0, 0, 0.4);
   color: white;
-  outline: none;
-  transition: 0.3s;
-}
-
-input:focus, textarea:focus {
-  border-color: var(--primary);
-  box-shadow: 0 0 10px var(--primary-glow);
-}
-
-button.primary {
-  width: 100%;
-  padding: 14px;
-  border: none;
-  border-radius: 8px;
-  background: linear-gradient(90deg, var(--primary), var(--accent));
-  color: white;
-  font-weight: bold;
   font-size: 1rem;
+  outline: none;
+  transition: all 0.3s ease;
+  box-shadow: inset 0 2px 4px rgba(0,0,0,0.2);
+}
+
+input[type="password"]:focus, textarea:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2), inset 0 2px 4px rgba(0,0,0,0.2);
+}
+
+textarea {
+  resize: vertical;
+  min-height: 100px;
+}
+
+/* Custom File Input button for the Secret File */
+input[type="file"] {
+  display: none; /* Hide default */
+}
+
+.file-btn-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.btn-outline {
+  padding: 10px 16px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.2);
+  background: transparent;
+  color: #fff;
   cursor: pointer;
   transition: 0.3s;
-  box-shadow: 0 4px 15px var(--primary-glow);
+  font-size: 0.9rem;
+}
+.btn-outline:hover {
+  background: rgba(255,255,255,0.05);
+  border-color: #fff;
+}
+.file-name-display {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  font-style: italic;
+}
+
+/* Primary Gradient Button */
+button.primary {
+  width: 100%;
+  padding: 16px;
+  border: none;
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--primary), var(--secondary));
+  color: white;
+  font-weight: 700;
+  font-size: 1.1rem;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  box-shadow: 0 10px 20px var(--glow-primary);
+  position: relative;
+  overflow: hidden;
+  margin-top: 1rem;
+}
+
+button.primary::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; width: 100%; height: 100%;
+  background: linear-gradient(135deg, var(--secondary), var(--primary));
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+button.primary span {
+  position: relative;
+  z-index: 1;
 }
 
 button.primary:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 6px 20px var(--primary-glow);
+  transform: translateY(-3px);
+  box-shadow: 0 15px 25px var(--glow-secondary);
 }
 
+button.primary:hover::after {
+  opacity: 1;
+}
+
+button.primary:active {
+  transform: translateY(1px);
+}
+
+/* Result Box */
 .result {
-  margin-top: 1rem;
-  padding: 1rem;
-  background: rgba(0,0,0,0.3);
-  border-radius: 8px;
+  margin-top: 1.5rem;
+  padding: 1.5rem;
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+  border-radius: 12px;
   text-align: center;
   word-break: break-all;
+  color: var(--accent);
+  font-weight: 500;
+  animation: fadeIn 0.4s;
+}
+
+.result.error {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.2);
+  color: #ef4444;
 }
 
 .hidden { display: none !important; }
