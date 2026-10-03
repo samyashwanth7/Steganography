@@ -12,6 +12,7 @@ import math
 import secrets
 import string
 import uuid
+import base64
 import numpy as np
 from PIL import Image
 
@@ -241,7 +242,7 @@ class AudioHandler(MediaHandler):
                 return bytearray(af.readframes(af.getnframes())), af.getparams()
         except wave.Error:
             if not PYDUB_AVAILABLE or AudioSegment is None:
-                raise HTTPException(422, "Compressed audio decoding requires pydub/audioop. Please upload an uncompressed .wav file.")
+                raise HTTPException(422, "Could not decode this audio. Upload a WAV file, or MP3/OGG/FLAC on a server with ffmpeg installed.")
             try:
                 audio = AudioSegment.from_file(io.BytesIO(media_bytes))
                 wav_io = io.BytesIO()
@@ -250,7 +251,7 @@ class AudioHandler(MediaHandler):
                 with wave.open(wav_io, 'rb') as af:
                     return bytearray(af.readframes(af.getnframes())), af.getparams()
             except Exception:
-                raise HTTPException(422, "Could not decode audio")
+                raise HTTPException(422, "Could not decode this audio. Upload a WAV file, or MP3/OGG/FLAC on a server with ffmpeg installed.")
 
     def get_capacity(self, media_bytes: bytes) -> int:
         frames, _ = self._load(media_bytes)
@@ -348,7 +349,7 @@ def encode_additive(handler, media_bytes: bytes, payload: bytes, key: str, extra
         'key_hash': key_hash,
         'start_bit': start_bit,
         'length_bits': len(bin_payload),
-        'ts': datetime.datetime.utcnow().isoformat(),
+        'ts': datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     if extra_manifest_fields:
         entry.update(extra_manifest_fields)
@@ -437,8 +438,9 @@ async def get_admin_user(user=Depends(get_current_user)):
     """Dependency that ensures the current user is an admin."""
     if not supabase:
         raise HTTPException(500, "Supabase not configured")
-    res = supabase.table('users').select('is_admin').eq('id', user['sub']).single().execute()
-    if not res.data or not res.data.get('is_admin'):
+    res = supabase.table('users').select('is_admin').eq('id', user['sub']).limit(1).execute()
+    row = res.data[0] if res.data else None
+    if not row or not row.get('is_admin'):
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
 
@@ -468,7 +470,7 @@ async def health_check():
     return {
         "status": "healthy",
         "engine": "active",
-        "ciphers": ["AES-256-CBC", "HMAC-SHA-256"]
+        "ciphers": ["AES-256-GCM", "scrypt"]
     }
 
 
@@ -488,7 +490,7 @@ async def register(body: RegisterRequest):
             raise HTTPException(400, "Registration failed")
 
         user_id = auth_res.user.id
-        now = datetime.datetime.utcnow().isoformat()
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         supabase.table('users').insert({
             "id": user_id,
             "first_name": body.first_name,
@@ -538,10 +540,11 @@ async def get_me(user=Depends(get_current_user)):
     if not supabase:
         raise HTTPException(500, "Supabase not configured")
     try:
-        res = supabase.table('users').select('*').eq('id', user['sub']).single().execute()
-        if not res.data:
+        res = supabase.table('users').select('*').eq('id', user['sub']).limit(1).execute()
+        row = res.data[0] if res.data else None
+        if not row:
             raise HTTPException(404, "User profile not found")
-        return res.data
+        return row
     except HTTPException:
         raise
     except Exception as e:
@@ -554,7 +557,7 @@ async def heartbeat(user=Depends(get_current_user)):
     if not supabase:
         raise HTTPException(500, "Supabase not configured")
     try:
-        now = datetime.datetime.utcnow().isoformat()
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         supabase.table('users').update({"last_active": now}).eq('id', user['sub']).execute()
         return {"status": "ok", "last_active": now}
     except Exception as e:
@@ -567,7 +570,7 @@ async def logout(user=Depends(get_current_user)):
     if not supabase:
         raise HTTPException(500, "Supabase not configured")
     try:
-        now = datetime.datetime.utcnow().isoformat()
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         supabase.table('users').update({"logout_time": now}).eq('id', user['sub']).execute()
         return {"status": "ok", "logout_time": now}
     except Exception as e:
@@ -691,6 +694,8 @@ async def enc_text(
             media_type=mt,
             headers={"Content-Disposition": f'attachment; filename="{stem}_stego{ext}"'}
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -725,6 +730,10 @@ async def enc_file(
         if receiver_name: extra['receiver_name'] = receiver_name
 
         media_bytes = await mf.read()
+        sb = await sf_obj.read()
+        sf = (sf_obj.filename or "secret.bin").encode("utf-8")
+        p = MAGIC_BYTES + struct.pack(">H", len(sf)) + sf + struct.pack(">I", len(sb)) + sb
+
         handler = get_media_handler(mf.content_type, mf.filename, media_bytes)
         b = encode_additive(
             handler,
@@ -742,6 +751,8 @@ async def enc_file(
             media_type=mt,
             headers={"Content-Disposition": f'attachment; filename="{stem}_stego{ext}"'}
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -762,6 +773,8 @@ async def dec(
         if t == "text": 
             return {"type": "text", "message": data}
         raise HTTPException(404, "Not found or invalid key")
+    except HTTPException:
+        raise
     except Exception as e: 
         raise HTTPException(400, str(e))
 
@@ -799,7 +812,6 @@ async def dec_batch(
             try:
                 t, data = decode_additive(handler, media_bytes, key)
                 if t == "file":
-                    import base64
                     results[key] = {"type": "file", "filename": data[0], "data": base64.b64encode(data[1]).decode('utf-8')}
                 elif t == "text":
                     results[key] = {"type": "text", "message": data}
@@ -808,6 +820,8 @@ async def dec_batch(
             except Exception as e:
                 results[key] = {"error": str(e)}
         return {"results": results}
+    except HTTPException:
+        raise
     except Exception as e: 
         raise HTTPException(400, str(e))
 
@@ -834,6 +848,8 @@ async def del_secret(
             media_type=mt,
             headers={"Content-Disposition": f'attachment; filename="{stem}_cleaned{ext}"'}
         )
+    except HTTPException:
+        raise
     except Exception as e: 
         raise HTTPException(400, str(e))
 
@@ -885,7 +901,7 @@ async def save_to_library(
             file_options={"content-type": file.content_type or "application/octet-stream"},
         )
 
-        now = datetime.datetime.utcnow().isoformat()
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         record = {
             "id": file_id,
             "filename": filename,
@@ -923,11 +939,12 @@ async def delete_library_item(item_id: str, user=Depends(get_current_user)):
         raise HTTPException(500, "Supabase not configured")
     try:
         # Get the record first to find the storage path
-        res = supabase.table('encoded_images').select('filepath').eq('id', item_id).eq('owner_id', user['sub']).single().execute()
-        if not res.data:
+        res = supabase.table('encoded_images').select('filepath').eq('id', item_id).eq('owner_id', user['sub']).limit(1).execute()
+        row = res.data[0] if res.data else None
+        if not row:
             raise HTTPException(404, "Item not found")
 
-        filepath = res.data['filepath']
+        filepath = row['filepath']
         # Delete from storage
         supabase.storage.from_('uploads').remove([filepath])
         # Delete from DB
@@ -975,17 +992,18 @@ async def send_email(body: SendEmailRequest, user=Depends(get_current_user)):
         raise HTTPException(500, "Supabase not configured")
     try:
         sender_id = user['sub']
-        now = datetime.datetime.utcnow().isoformat()
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         results = []
 
         for recipient_email in body.recipients:
             # Look up recipient in users table
-            res = supabase.table('users').select('id').eq('email', recipient_email).single().execute()
-            if not res.data:
+            res = supabase.table('users').select('id').eq('email', recipient_email).limit(1).execute()
+            row = res.data[0] if res.data else None
+            if not row:
                 results.append({"email": recipient_email, "status": "user_not_found"})
                 continue
 
-            receiver_id = res.data['id']
+            receiver_id = row['id']
             # Extract filename from file_path
             stored_filename = os.path.basename(body.file_path)
             message_record = {
@@ -1001,6 +1019,8 @@ async def send_email(body: SendEmailRequest, user=Depends(get_current_user)):
             results.append({"email": recipient_email, "status": "sent"})
 
         return {"results": results}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -1045,6 +1065,8 @@ async def admin_get_users(user=Depends(get_admin_user)):
     try:
         res = supabase.table('users').select('*').execute()
         return {"data": res.data}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -1053,8 +1075,8 @@ async def admin_get_users(user=Depends(get_admin_user)):
 async def admin_detect(media: UploadFile = File(...), user=Depends(get_admin_user)):
     """Admin only: forensic audit — decode the manifest to reveal all embedded payloads."""
     try:
-        handler = get_media_handler(media.content_type)
         media_bytes = await media.read()
+        handler = get_media_handler(media.content_type, media.filename, media_bytes)
         manifest, _ = decode_additive(handler, media_bytes, MANIFEST_KEY, manifest_only=True)
 
         if not manifest:
@@ -1065,6 +1087,8 @@ async def admin_detect(media: UploadFile = File(...), user=Depends(get_admin_use
             "total_secrets": len(manifest),
             "message": f"Detected {len(manifest)} embedded payload(s)",
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(400, str(e))
 

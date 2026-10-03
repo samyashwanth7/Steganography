@@ -1,12 +1,14 @@
-fastapi
-uvicorn
-cryptography
-pillow
-numpy
-python-multipart
-pydub
-audioop-lts
-supabase
-python-jose[cryptography]
-python-dotenv
-pydantic
+fastapi>=0.115,<1
+uvicorn>=0.34,<1
+cryptography>=44
+pillow>=11,<13
+numpy>=1.26,<3
+scipy>=1.13
+python-multipart>=0.0.20
+pydub==0.25.1
+audioop-lts; python_version >= "3.13"
+supabase>=2.10,<3
+python-jose[cryptography]>=3.3
+python-dotenv>=1.0
+pydantic>=2.7,<3
+slowapi>=0.1.9
