@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Next.js
+.next/
+out/
+build/
+
+# Environments
+.env
+.env.local
+.env.*.local
+backend/.env
+frontend/.env.local
+
+# macOS metadata
+.DS_Store
+._*
+
+# OS / IDE
+.vscode/
+.idea/
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*

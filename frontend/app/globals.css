@@ -1,0 +1,72 @@
+@import "tailwindcss";
+
+@theme {
+  --font-heading: var(--font-heading), system-ui, sans-serif;
+  --font-sans: var(--font-sans), system-ui, sans-serif;
+}
+
+@layer base {
+  :root {
+    --background: #050507;
+    --foreground: #f4f4f5;
+  }
+  
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-heading);
+  }
+}
+
+@layer components {
+  /* High-end glass card with subtle border & depth */
+  .steno-card {
+    @apply bg-zinc-950/70 backdrop-blur-2xl border border-white/[0.08] rounded-2xl shadow-[0_12px_40px_rgba(0,0,0,0.6)] ring-1 ring-white/[0.03];
+  }
+
+  /* Interactive subtle surface */
+  .steno-surface {
+    @apply bg-white/[0.02] border border-white/[0.06] rounded-xl hover:border-white/[0.12] transition-colors;
+  }
+  
+  /* Ultra-crisp input with glow focus */
+  .glass-input {
+    @apply w-full bg-zinc-900/60 border border-zinc-800 hover:border-zinc-700 focus:border-red-500/80 rounded-xl px-4 py-3 text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-red-500/20 transition-all font-sans text-sm;
+  }
+  
+  /* Primary Cyber Button */
+  .btn-primary {
+    @apply relative inline-flex items-center justify-center gap-2 font-medium tracking-wide text-sm px-6 py-3 rounded-xl bg-gradient-to-r from-red-600 via-red-500 to-amber-600 text-white shadow-[0_0_25px_rgba(239,68,68,0.35)] hover:shadow-[0_0_35px_rgba(239,68,68,0.5)] hover:from-red-500 hover:to-amber-500 active:scale-[0.98] transition-all disabled:opacity-50 disabled:pointer-events-none;
+  }
+  
+  /* Secondary Cyber Button */
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 font-medium text-sm px-5 py-2.5 rounded-xl bg-white/[0.03] border border-white/[0.08] hover:border-white/[0.18] hover:bg-white/[0.06] text-zinc-300 hover:text-white transition-all active:scale-[0.98];
+  }
+
+  /* Pill badge */
+  .steno-badge {
+    @apply inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium tracking-wide uppercase border;
+  }
+}
+
+/* Custom scrollbars that look sleek */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(239, 68, 68, 0.5);
+}

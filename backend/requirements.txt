@@ -5,3 +5,7 @@ pillow
 numpy
 python-multipart
 pydub
+supabase
+python-jose[cryptography]
+python-dotenv
+pydantic
