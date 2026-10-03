@@ -5,6 +5,7 @@ pillow
 numpy
 python-multipart
 pydub
+audioop-lts
 supabase
 python-jose[cryptography]
 python-dotenv

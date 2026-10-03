@@ -14,8 +14,28 @@ import string
 import uuid
 import numpy as np
 from PIL import Image
-from pydub import AudioSegment
-from pydub.exceptions import CouldntDecodeError
+
+# Python 3.13 compatibility shim for audioop / pyaudioop
+import sys
+try:
+    import audioop
+except ImportError:
+    try:
+        import audioop_lts as _aop
+        sys.modules['audioop'] = _aop
+        sys.modules['pyaudioop'] = _aop
+    except ImportError:
+        pass
+
+try:
+    from pydub import AudioSegment
+    from pydub.exceptions import CouldntDecodeError
+    PYDUB_AVAILABLE = True
+except Exception:
+    AudioSegment = None
+    class CouldntDecodeError(Exception):
+        pass
+    PYDUB_AVAILABLE = False
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.backends import default_backend
@@ -220,6 +240,8 @@ class AudioHandler(MediaHandler):
             with wave.open(io.BytesIO(media_bytes), 'rb') as af:
                 return bytearray(af.readframes(af.getnframes())), af.getparams()
         except wave.Error:
+            if not PYDUB_AVAILABLE or AudioSegment is None:
+                raise HTTPException(422, "Compressed audio decoding requires pydub/audioop. Please upload an uncompressed .wav file.")
             try:
                 audio = AudioSegment.from_file(io.BytesIO(media_bytes))
                 wav_io = io.BytesIO()
@@ -227,7 +249,7 @@ class AudioHandler(MediaHandler):
                 wav_io.seek(0)
                 with wave.open(wav_io, 'rb') as af:
                     return bytearray(af.readframes(af.getnframes())), af.getparams()
-            except CouldntDecodeError:
+            except Exception:
                 raise HTTPException(422, "Could not decode audio")
 
     def get_capacity(self, media_bytes: bytes) -> int:
