@@ -1,94 +1,220 @@
-# Advanced Steganography Platform
+# STENO — Cryptographic Steganography Protocol & Steganalysis Lab
 
-## Overview
-The Advanced Steganography Platform is a web-based application designed to hide sensitive information (text, files, or credentials) inside innocent-looking cover media (images, audio files, or plain text). Unlike basic steganography tools, this platform features **Complex Additive Steganography**, allowing users to hide *multiple*, independent secrets sequentially within the same cover file without overwriting previous data.
+> Multi-payload additive steganography and forensic steganalysis suite for hiding encrypted data, files, and credentials inside images, audio, and text with zero audible or visual distortion.
 
-This project focuses solely on **Fast, Serverless-ready Steganography**, discarding unnecessary bloat such as persistent user databases and messaging loops in favor of a lean cryptographic tool ready for instant scaling.
+---
 
-## Live Demo
-The frontend UI is hosted on GitHub Pages: [https://samyashwanth7.github.io/Steganography](https://samyashwanth7.github.io/Steganography)
+## Features
 
-> **Note**: As GitHub Pages only hosts static files, the cryptographic backend (Python FastAPI) needs to be running locally or hosted on an external server (like Render or Heroku) for the encoding and decoding functionality to work.
+- **Additive Multi-Payload Embedding**: Embed multiple independent secrets inside a single carrier file sequentially with different keys without overwriting previous data.
+- **Modern v2 Cryptographic Architecture**: Memory-hard `scrypt` key derivation (`N=16384, r=8, p=1`), `AES-256-GCM` authenticated encryption, and deterministic pseudo-random index scattering.
+- **±1 Matching (LSB Matching)**: In images, avoids classical LSB replacement artifacts by randomly incrementing or decrementing pixel values, resisting pairs-of-values chi-square steganalysis.
+- **Low-Byte Sample Audio Steganography**: 16-bit WAV PCM embedding modifying only the low byte of each sample (max sample delta $\le 1$, inaudible to human hearing).
+- **Distributed Zero-Width Steganography**: Embeds data invisibly in plain text using zero-width characters distributed across inter-word spaces.
+- **Steganalysis Lab**: Live forensic detection powered by the Westfeld–Pfitzmann Chi-Square statistical test, LSB bit plane isolation, and real-time PSNR calculation.
+- **Cryptographic Erasure (Scrubbing)**: Overwrites targeted secret bit regions with cryptographically secure random bits and rewrites the manifest.
+- **Full Legacy Backward Compatibility**: Seamlessly detects and decodes legacy v1 files through automatic format detection.
 
-## Features & Core Functionalities
+---
 
-### 1. Complex Additive Steganography
-The platform's additive nature allows multiple distinct payloads inside the same file:
-- **The Manifest**: The application reserves the first few bits of a file for an *Encrypted Manifest*. Every time a new secret is encoded, its `key_hash`, `start_bit`, and `length_bits` are added to this manifest.
-- **Location Randomization**: Using a `MANIFEST_KEY`, the platform securely and predictably shuffles the indices of the media, scattering the manifest bits across the file to avoid sequential detection.
-- **Capacity Checking**: Calculates remaining capacity dynamically, placing new secrets right after the last without data loss.
+## Screenshots
 
-### 2. Supported Cover Media
-- **Images (PNG, JPG, etc.)**: Alters the Least Significant Bits (LSBs) of image pixels. Visual distortion is practically zero. Auto-coverts unsupported types to PNG to preserve bits.
-- **Audio (WAV)**: Alters the LSBs of audio frame data. Uses `wave` and `ffmpeg/afconvert` dynamically for conversions.
-- **Text**: Embeds data invisibly using "Zero-Width Characters" (ZWCs). Scatters invisible ZWC symbols within spaces of a plain text file.
+| Cryptographic Studio | Steganalysis Lab |
+|:---:|:---:|
+| *(Upload cover media, configure multiple secrets, key generator, and capacity monitor)* | *(Chi-Square detection gauge, verdict badge, PSNR delta, and isolated LSB bit plane)* |
 
-### 3. Security & Encryption
-- All secret payloads undergo `zlib` compression.
-- Compressed payloads are encrypted using **AES-128 in CBC mode**.
-- The encryption key is derived using `PBKDF2 HMAC SHA-256` (hashed 100,000 times) with a randomly generated 16-byte salt and IV.
+| Forensic Audit | Vault / Library |
+|:---:|:---:|
+| *(Admin payload audit, timestamp tracking, and bit-span inspection)* | *(Cloud storage vault for encoded carriers with search and metadata)* |
+
+---
 
 ## Architecture
 
-The project is structured with a monolithic full-stack design utilizing modern frameworks.
-
 ```
-Steganography/
-├── backend/                  # Fast API Python backend for cryptographic tasks
-│   ├── main.py               # Core application entrypoint & API endpoints
-│   ├── requirements.txt      # Python dependencies
-│   ├── uploads/              # Temporary file processing directory
-│   └── (Cryptographic Handlers & Utilities)
-├── frontend/                 # Next.js React application
-│   ├── app/                  # Main interactive UI components and layouts
-│   ├── public/               # Static assets
-│   ├── package.json          # Node.js dependencies
-│   └── (Configuration files)
-└── README.md                 # Project documentation
+┌─────────────────────────────────┐
+│     Next.js 16 Web Client       │
+│  (React 19, Tailwind, Vercel)   │
+└────────────────┬────────────────┘
+                 │ HTTPS / REST (Proxied)
+                 ▼
+┌─────────────────────────────────┐
+│      FastAPI Python Server      │
+│  (Python 3.12, NumPy, Render)   │
+└────────────────┬────────────────┘
+                 │ Service Role / Auth
+                 ▼
+┌─────────────────────────────────┐
+│        Supabase Platform        │
+│   (Auth, Postgres, Storage)     │
+└─────────────────────────────────┘
 ```
 
-### Backend (`backend/main.py`)
-Provides the stateless API to encode and decode payloads:
-- `encode_additive()`: Core logic to handle file/payload combination using AES.
-- `decode_additive()`: Logic to resolve manifests and rebuild arrays from shuffled bytes to retrieve payloads.
-- `/api/encode-text` & `/api/encode-file`: Endpoints to inject secrets.
-- `/api/decode`: Evaluates incoming files, parses the manifest using the original user key, and extracts payloads.
+---
 
-### Frontend (`frontend`)
-A streamlined UI built on Next.js focusing on usability:
-- **MediaDropzone**: Responsive drag-and-drop feature for cover files.
-- **Sequential Encoding UI**: Allows adding multiple data payloads with different keys sequentially.
-- **Key Strength Visualizer**: Ensures passwords used to derive the AES keys represent real security.
-- **ModeToggle**: Easily switch between hiding raw text, full files, or password credentials.
+## How It Works
 
-## Workflows
+### STENO v2 Format
 
-**Encoding Workflow:**
-1. User uploads a standard Media File (Cover).
-2. User provides a Secret Payload and Key.
-3. Payload gets Compressed -> AES Encrypted -> Converted to Binary bits.
-4. Backend retrieves the file's current Manifest (if any) and appends new metadata.
-5. Randomly scatters the new Binary payload inside the Cover File based on key hashes.
-6. User downloads the "dirty" cover file.
+1. **Encrypted Manifest Header**:
+   - Reserved at bit offset `0` of the carrier.
+   - Encrypted using `AES-256-GCM` with key `SHA-256("steno-v2-manifest|" + MANIFEST_KEY)` and authenticated with prefix `STN2`.
+   - Contains a list of payload descriptors with random salts, HMAC key tags, bit offsets, lengths, and timestamps.
+   - **Zero Key Leakage**: Manifest entries never store plaintext keys or SHA-256 key hashes. Secret discovery uses constant-time HMAC tag comparison: `HMAC-SHA256(id_key, "steno-v2-id")`.
 
-**Decoding Workflow:**
-1. Receiver uploads the "dirty" Media File and enters their unique Key.
-2. System decrypts the hidden Manifest.
-3. Bits are extracted from the correlated randomized location and rebuilt into an encrypted block.
-4. Block undergoes AES Decryption -> Zlib Decompression -> Returns the original Payload.
+2. **Payload Encryption**:
+   - Key derivation: `(enc_key, id_key) = scrypt(key, salt, N=16384, r=8, p=1, dklen=64)`.
+   - Compression: Level-9 `zlib` compression.
+   - Encryption: `AES-256-GCM` with a 12-byte random cryptographic nonce and 16-byte authentication tag.
 
-## Setup & Running Locally
+3. **Carrier Embedding**:
+   - **Images**: Uses RGB channels only. Where the carrier LSB mismatches the payload bit, the value is shifted by $\pm 1$ randomly (`+1` when 0, `-1` when 255). Alpha channel remains byte-identical.
+   - **Audio**: Little-endian 16-bit WAV PCM. Slots map to byte `i * sampwidth` (the low byte of each sample), ensuring sample delta never exceeds 1.
+   - **Text**: Zero-width non-joiners (`\u200c`) and joiners (`\u200d`) are evenly distributed across inter-word spaces rather than appended to the end.
 
-### Backend (Python)
-1. Navigate to the `backend/` directory.
-2. Create a virtual environment: `python -m venv venv`
-3. Activate the virtual environment.
-4. Install requirements: `pip install -r requirements.txt`
-5. Run the server: `uvicorn main:app --reload` (Runs on port 8000)
+4. **True Erasure (Scrubbing)**:
+   - When a secret is deleted, its exact bit range in the carrier is overwritten with cryptographically random noise before the manifest is re-encrypted.
 
-### Frontend (Next.js)
-1. Navigate to the `frontend/` directory.
-2. Install dependencies: `npm install`
-3. Start the dev server: `npm run dev` (Runs on port 3000 by default)
+### Legacy v1 Compatibility
 
-Open `http://localhost:3000` to access the Steganography platform!
+When decoding, STENO checks the manifest length and magic header. If an older v1 file is detected, STENO automatically routes extraction through the legacy CBC/PBKDF2 engine using the built-in legacy manifest key. Legacy files remain decodable, while new writes into legacy files are safely rejected (HTTP 409) to preserve archive integrity.
+
+---
+
+## Security Model & Honest Limitations
+
+Like all steganographic systems, STENO has explicit threat model boundaries:
+
+1. **Lossy Compression Destroys Hidden Data**:
+   - LSB steganography relies on exact pixel and sample values.
+   - Saving an encoded image as JPEG, converting WAV to MP3/AAC, or sending media through platforms that recompress uploads (WhatsApp, Twitter/X, Instagram, Discord) **destroys the embedded payload**.
+   - Carriers must be transported in lossless containers (PNG, WAV, UTF-8 text).
+
+2. **Text Normalization**:
+   - Zero-width unicode characters are invisible in text editors and browsers, but will be stripped by text sanitizers, Unicode normalization filters, or copy-pasting through ASCII-only terminal windows.
+
+3. **Server Manifest Key Dependency**:
+   - Because bit indices are pseudorandomly scattered using `MANIFEST_KEY`, carriers created on a server instance can only be decoded by servers sharing that same `MANIFEST_KEY`. Old v1 files decode anywhere via the standardized legacy key.
+
+4. **Steganalysis Visibility**:
+   - While $\pm 1$ matching resists naive pairs-of-values attacks better than basic LSB replacement, high-capacity embedding still alters image entropy. Heavy embedding in clean photos can be detected by sophisticated higher-order steganalysis tools.
+
+---
+
+## Steganalysis Lab
+
+The integrated Steganalysis Lab enables forensic inspection of suspect images:
+
+- **Westfeld–Pfitzmann Chi-Square Test**: Evaluates frequency differences between adjacent pixel pairs ($2k$ and $2k+1$) across RGB histograms. Computes degrees of freedom and the survival function $p$-value ($p < 0.3$: *Not detected*, $p < 0.8$: *Suspicious*, $p \ge 0.8$: *Likely stego*).
+- **LSB Plane Isolation**: Extracts bit 0 across RGB channels and stretches to full binary contrast ($0 \to 0$, $1 \to 255$). Natural images show residual image outlines; stego images exhibit uniform static noise.
+- **PSNR (Peak Signal-to-Noise Ratio)**: When the original cover image is provided, computes exact mean squared error and PSNR in decibels:
+  $$\text{PSNR} = 10 \cdot \log_{10}\left(\frac{255^2}{\text{MSE}}\right)$$
+
+---
+
+## Tech Stack
+
+- **Backend**: Python 3.12, FastAPI, NumPy, SciPy, Pillow, Cryptography (AES-GCM, scrypt), SlowAPI, PyDub, Supabase-py.
+- **Frontend**: Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS, Framer Motion, Lucide React.
+- **Infrastructure**: Vercel (Frontend), Render (FastAPI Backend), Supabase (Auth, PostgreSQL, Storage).
+
+---
+
+## Local Setup
+
+### Prerequisites
+
+- Python 3.12+
+- Node.js 20+ and npm
+
+### 1. Backend
+
+```bash
+cd backend
+python -m venv venv
+
+# Windows:
+.\venv\Scripts\activate
+# Linux/macOS:
+source venv/bin/activate
+
+pip install -r requirements.txt -r requirements-dev.txt
+cp .env.example .env
+```
+
+Configure `backend/.env`:
+```ini
+MANIFEST_KEY=your-custom-secret-key-here
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=your-anon-key
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+SUPABASE_JWT_SECRET=your-jwt-secret
+ALLOWED_ORIGINS=http://localhost:3000
+RATELIMIT_ENABLED=1
+ALLOW_DEV_AUTH=1
+```
+
+Run the backend:
+```bash
+uvicorn main:app --reload --port 8000
+```
+
+### 2. Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:3000` in your browser.
+
+---
+
+## Deployment
+
+### Render (Backend)
+
+- Environment: Python 3.12 (`PYTHON_VERSION=3.12.8`)
+- Build Command: `pip install -r backend/requirements.txt`
+- Start Command: `uvicorn backend.main:app --host 0.0.0.0 --port $PORT`
+- Environment Variables:
+  - `MANIFEST_KEY`: High-entropy 32-character key (`python -c "import secrets; print(secrets.token_urlsafe(32))"`)
+  - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_JWT_SECRET`
+  - `ALLOWED_ORIGINS`: `https://your-vercel-domain.vercel.app`
+  - `RATELIMIT_ENABLED`: `1`
+  - `ALLOW_DEV_AUTH`: `0`
+
+### Vercel (Frontend)
+
+- Framework Preset: Next.js
+- Root Directory: `frontend`
+- Environment Variables:
+  - `BACKEND_URL`: `https://your-render-service.onrender.com`
+
+---
+
+## Running Tests
+
+### Backend Test Suite
+
+The backend test suite validates all 14 format, cryptography, legacy decoding, and security assertions:
+
+```bash
+cd backend
+python -m pytest tests -q
+```
+
+### Frontend Typecheck & Build
+
+```bash
+cd frontend
+npx tsc --noEmit
+npm run build
+```
+
+---
+
+## License
+
+MIT License. Designed and built for secure cryptographic research and portfolio demonstration.
