@@ -283,11 +283,11 @@ export default function AdminPage() {
                           Steganography Detected
                         </span>
                         <span className="text-gray-400 text-sm">
-                          — {(trackResults.manifest || []).length} payload(s) found
+                          — {(trackResults.payloads || trackResults.manifest || []).length} payload(s) found
                         </span>
                       </div>
 
-                      {(trackResults.manifest || []).map((entry: any, i: number) => (
+                      {(trackResults.payloads || trackResults.manifest || []).map((entry: any, i: number) => (
                         <div
                           key={i}
                           className="p-4 bg-black/40 border border-red-900/20 rounded-lg space-y-2"
@@ -324,10 +324,10 @@ export default function AdminPage() {
                           <div className="text-sm">
                             <span className="text-gray-400">
                               <Hash className="w-4 h-4 inline mr-1" />
-                              Key Signature:
+                              Format &amp; Span:
                             </span>{" "}
                             <span className="text-yellow-400 font-mono text-xs">
-                              {entry.key_hash?.slice(0, 16)}...
+                              {(entry.format || "v2").toUpperCase()} · Bit {entry.start_bit} ({entry.length_bits} bits)
                             </span>
                           </div>
                         </div>

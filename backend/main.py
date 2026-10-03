@@ -13,6 +13,8 @@ import secrets
 import string
 import uuid
 import base64
+import logging
+import functools
 import numpy as np
 from PIL import Image
 
@@ -37,7 +39,9 @@ except Exception:
     class CouldntDecodeError(Exception):
         pass
     PYDUB_AVAILABLE = False
+
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.backends import default_backend
 
@@ -53,14 +57,63 @@ from jose import jwt, JWTError
 
 load_dotenv()
 
-# --- Config & Setup ---
+# --- App Setup ---
 app = FastAPI(title="Core Steganography API")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
+# --- CORS ---
+allowed_origins_raw = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")
+allowed_origins = [o.strip() for o in allowed_origins_raw.split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --- Rate Limiting (slowapi with fallback) ---
+def get_real_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "127.0.0.1"
+
+try:
+    from slowapi import Limiter, _rate_limit_exceeded_handler
+    from slowapi.errors import RateLimitExceeded
+    limiter = Limiter(key_func=get_real_ip, enabled=os.getenv("RATELIMIT_ENABLED", "1") != "0")
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+except ImportError:
+    class _DummyLimiter:
+        def limit(self, *args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+    limiter = _DummyLimiter()
+
+# --- Supabase Config ---
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+
+_supabase_data_key = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY
+if not SUPABASE_SERVICE_ROLE_KEY and SUPABASE_KEY:
+    logging.warning("SUPABASE_SERVICE_ROLE_KEY not set; falling back to anon SUPABASE_KEY for data operations.")
+
+supabase: Client = create_client(SUPABASE_URL, _supabase_data_key) if SUPABASE_URL and _supabase_data_key else None
+
+# --- Constants & Keys (v2 & legacy) ---
+LEGACY_MANIFEST_KEY = "a7e1f5d2-a8b3-4c9f-8d7e-2c5b6a1d4f8e"  # public; used ONLY to read v1 files
+_env_manifest = os.getenv("MANIFEST_KEY")
+if not _env_manifest:
+    logging.warning("MANIFEST_KEY environment variable is not set! Using dev-insecure-manifest-key. DO NOT USE IN PRODUCTION.")
+MANIFEST_KEY = _env_manifest or "dev-insecure-manifest-key"
+V2_MAGIC = b"STN2"
+V2_PERM_KEY = "v2:" + MANIFEST_KEY
+V2_MANIFEST_AES_KEY = hashlib.sha256(b"steno-v2-manifest|" + MANIFEST_KEY.encode()).digest()
+SCRYPT_N, SCRYPT_R, SCRYPT_P = 2**14, 8, 1
 
 MAGIC_BYTES = b"STG_F"
 HEADER_FILENAME_LEN_BYTES = 2
@@ -70,9 +123,8 @@ IV_BYTES = 16
 MAX_FILE_SIZE = 50 * 1024 * 1024
 ZERO_WIDTH_ZERO = '\u200c'
 ZERO_WIDTH_ONE = '\u200d'
-MANIFEST_KEY = os.getenv("MANIFEST_KEY", "a7e1f5d2-a8b3-4c9f-8d7e-2c5b6a1d4f8e")
 MANIFEST_HEADER_LENGTH_BITS = 32
-MANIFEST_RESERVED_BITS = 32768  # Increased from 8192
+MANIFEST_RESERVED_BITS = 32768
 
 
 # --- Pydantic Models ---
@@ -97,6 +149,8 @@ class RenameLibraryRequest(BaseModel):
 
 
 # --- Core Cryptography ---
+
+# Legacy v1 crypto (for backward compatibility decoding only)
 def derive_key(key: str, salt: bytes) -> bytes:
     return hashlib.pbkdf2_hmac('sha256', key.encode('utf-8'), salt, 100000, dklen=32)
 
@@ -121,19 +175,31 @@ def decrypt_payload(encrypted_data: bytes, key: str) -> bytes:
     unpadder = padding.PKCS7(128).unpadder()
     return unpadder.update(padded_data) + unpadder.finalize()
 
+# v2 crypto (scrypt + AES-GCM)
+def derive_v2(key: str, salt: bytes) -> tuple[bytes, bytes]:
+    m = hashlib.scrypt(key.encode(), salt=salt, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P, dklen=64)
+    return m[:32], m[32:]  # (enc_key, id_key)
+
+def key_tag(id_key: bytes) -> bytes:
+    return hmac.new(id_key, b"steno-v2-id", hashlib.sha256).digest()[:16]
+
 def data_to_binary(data: bytes) -> str:
     return ''.join(format(byte, '08b') for byte in data)
 
 def binary_to_data(binary: str) -> bytes:
-    if len(binary) % 8 != 0: binary = binary[:-(len(binary) % 8)]
+    if len(binary) % 8 != 0:
+        binary = binary[:-(len(binary) % 8)]
     return bytes(int(binary[i:i+8], 2) for i in range(0, len(binary), 8))
 
+@functools.lru_cache(maxsize=4)
 def get_randomized_indices(key: str, total_size: int) -> np.ndarray:
     seed = int.from_bytes(hashlib.sha256(key.encode('utf-8')).digest(), 'big') % (2**32 - 1)
     rng = np.random.default_rng(seed)
     indices = np.arange(total_size)
     rng.shuffle(indices)
+    indices.setflags(write=False)
     return indices
+
 
 def check_key_strength(key: str):
     """Granular 0-100 key strength scorer."""
@@ -163,22 +229,14 @@ def check_key_strength(key: str):
     has_digit = any(c.isdigit() for c in key)
     has_special = any(not c.isalnum() for c in key)
 
-    if has_lower:
-        score += 10
-    else:
-        suggestions.append("Add lowercase letters")
-    if has_upper:
-        score += 10
-    else:
-        suggestions.append("Add uppercase letters")
-    if has_digit:
-        score += 10
-    else:
-        suggestions.append("Add numbers")
-    if has_special:
-        score += 10
-    else:
-        suggestions.append("Add special characters (!@#$%^&*)")
+    if has_lower: score += 10
+    else: suggestions.append("Add lowercase letters")
+    if has_upper: score += 10
+    else: suggestions.append("Add uppercase letters")
+    if has_digit: score += 10
+    else: suggestions.append("Add numbers")
+    if has_special: score += 10
+    else: suggestions.append("Add special characters (!@#$%^&*)")
 
     # Shannon entropy (up to 30 points)
     if length > 0:
@@ -186,14 +244,12 @@ def check_key_strength(key: str):
         for c in key:
             freq[c] = freq.get(c, 0) + 1
         entropy = -sum((count / length) * math.log2(count / length) for count in freq.values())
-        # Normalize: max entropy for printable ASCII is ~6.5 bits
         entropy_score = min(30, int((entropy / 6.5) * 30))
         score += entropy_score
         if entropy < 2.5:
             suggestions.append("Avoid repetitive patterns; use more varied characters")
 
     score = max(0, min(100, score))
-
     if score >= 80:
         strength = "Strong"
     elif score >= 50:
@@ -206,36 +262,87 @@ def check_key_strength(key: str):
 
 # --- Media Handlers ---
 class MediaHandler:
-    def get_capacity(self, media_bytes: bytes) -> int: raise NotImplementedError
-    def embed_data(self, media_bytes: bytes, binary_data: str, key: str, start_bit: int = 0) -> bytes: raise NotImplementedError
-    def extract_data(self, media_bytes: bytes, key: str, num_bits: int, start_bit: int = 0) -> str: raise NotImplementedError
+    reserved_bits = 32768
+
+    def total_slots(self, media_bytes: bytes) -> int:
+        raise NotImplementedError
+
+    def embed_segments(self, media_bytes: bytes, segments: list[tuple[int, str]], perm_key: str) -> bytes:
+        raise NotImplementedError
+
+    def extract_bits(self, media_bytes: bytes, perm_key: str, num_bits: int, start_bit: int, version: int) -> str:
+        raise NotImplementedError
+
+    def get_capacity(self, media_bytes: bytes) -> int:
+        return max(0, (self.total_slots(media_bytes) - self.reserved_bits) // 8)
+
 
 class ImageHandler(MediaHandler):
-    def get_capacity(self, media_bytes: bytes) -> int:
+    reserved_bits = 32768
+
+    def total_slots(self, media_bytes: bytes) -> int:
         with Image.open(io.BytesIO(media_bytes)) as img:
-            return (np.array(img.convert('RGBA')).size // 8) - (MANIFEST_RESERVED_BITS // 8)
-            
-    def embed_data(self, media_bytes: bytes, binary_data: str, key: str, start_bit: int = 0) -> bytes:
-        img = Image.open(io.BytesIO(media_bytes)).convert('RGBA')
-        data = np.array(img)
-        flat = data.flatten()
-        if start_bit + len(binary_data) > flat.size: raise ValueError("Data too large for image offset")
-        indices = get_randomized_indices(key, flat.size)
-        for i, b in enumerate(binary_data):
-            idx = indices[start_bit + i]
-            flat[idx] = (flat[idx] & 254) | int(b)
-        encoded_img = Image.fromarray(flat.reshape(data.shape), 'RGBA')
+            w, h = img.size
+            return w * h * 3
+
+    def extract_bits(self, media_bytes: bytes, perm_key: str, num_bits: int, start_bit: int, version: int) -> str:
+        if version == 1:
+            flat = np.array(Image.open(io.BytesIO(media_bytes)).convert('RGBA')).flatten()
+            if start_bit + num_bits > flat.size:
+                raise ValueError("Not enough space to extract bits")
+            indices = get_randomized_indices(perm_key, flat.size)
+            idx = indices[start_bit : start_bit + num_bits]
+            extracted = flat[idx] & 1
+            return (extracted.astype(np.uint8) + 48).tobytes().decode("ascii")
+        else:
+            arr = np.array(Image.open(io.BytesIO(media_bytes)).convert("RGBA"))
+            rgb = arr[..., :3].reshape(-1)
+            if start_bit + num_bits > rgb.size:
+                raise ValueError("Not enough space to extract bits")
+            indices = get_randomized_indices(perm_key, rgb.size)
+            idx = indices[start_bit : start_bit + num_bits]
+            extracted = rgb[idx] & 1
+            return (extracted.astype(np.uint8) + 48).tobytes().decode("ascii")
+
+    def embed_segments(self, media_bytes: bytes, segments: list[tuple[int, str]], perm_key: str) -> bytes:
+        orig_img = Image.open(io.BytesIO(media_bytes))
+        has_alpha = orig_img.mode in ("RGBA", "LA") or ("transparency" in orig_img.info)
+        arr = np.array(orig_img.convert("RGBA"))
+        h, w, _ = arr.shape
+        rgb = arr[..., :3].reshape(-1).copy()
+        total = rgb.size
+        indices = get_randomized_indices(perm_key, total)
+
+        for start_bit, bit_str in segments:
+            bits_arr = np.frombuffer(bit_str.encode("ascii"), dtype=np.uint8) - 48
+            n = len(bits_arr)
+            if start_bit + n > total:
+                raise ValueError("Data exceeds image capacity")
+            pos = indices[start_bit : start_bit + n]
+            mismatch = ((rgb[pos] & 1) != bits_arr)
+            if np.any(mismatch):
+                mismatch_pos = pos[mismatch]
+                mismatch_vals = rgb[mismatch_pos].astype(np.int16)
+                rng = np.random.default_rng(secrets.randbits(64))
+                deltas = rng.choice(np.array([-1, 1], dtype=np.int16), size=len(mismatch_pos))
+                deltas[mismatch_vals == 0] = 1
+                deltas[mismatch_vals == 255] = -1
+                rgb[mismatch_pos] = (mismatch_vals + deltas).astype(np.uint8)
+
+        arr[..., :3] = rgb.reshape(h, w, 3)
+        if has_alpha:
+            out_img = Image.fromarray(arr, 'RGBA')
+        else:
+            out_img = Image.fromarray(arr[..., :3], 'RGB')
+
         with io.BytesIO() as out:
-            encoded_img.save(out, format='PNG')
+            out_img.save(out, format="PNG")
             return out.getvalue()
-            
-    def extract_data(self, media_bytes: bytes, key: str, num_bits: int, start_bit: int = 0) -> str:
-        flat = np.array(Image.open(io.BytesIO(media_bytes)).convert('RGBA')).flatten()
-        if start_bit + num_bits > flat.size: raise ValueError("Not enough space to extract bits")
-        indices = get_randomized_indices(key, flat.size)
-        return "".join(str(flat[indices[start_bit + i]] & 1) for i in range(num_bits))
+
 
 class AudioHandler(MediaHandler):
+    reserved_bits = 32768
+
     def _load(self, media_bytes: bytes):
         try:
             with wave.open(io.BytesIO(media_bytes), 'rb') as af:
@@ -253,53 +360,102 @@ class AudioHandler(MediaHandler):
             except Exception:
                 raise HTTPException(422, "Could not decode this audio. Upload a WAV file, or MP3/OGG/FLAC on a server with ffmpeg installed.")
 
-    def get_capacity(self, media_bytes: bytes) -> int:
-        frames, _ = self._load(media_bytes)
-        return (len(frames) // 8) - (MANIFEST_RESERVED_BITS // 8)
-
-    def embed_data(self, media_bytes: bytes, binary_data: str, key: str, start_bit: int = 0) -> bytes:
+    def total_slots(self, media_bytes: bytes) -> int:
         frames, params = self._load(media_bytes)
-        if start_bit + len(binary_data) > len(frames): raise ValueError("Data too large for audio offset")
-        indices = get_randomized_indices(key, len(frames))
-        for i, b in enumerate(binary_data):
-            idx = indices[start_bit + i]
-            frames[idx] = (frames[idx] & 254) | int(b)
+        return len(frames) // params.sampwidth
+
+    def extract_bits(self, media_bytes: bytes, perm_key: str, num_bits: int, start_bit: int, version: int) -> str:
+        frames, params = self._load(media_bytes)
+        if version == 1:
+            if start_bit + num_bits > len(frames):
+                raise ValueError("Not enough space to extract bits")
+            arr_frames = np.frombuffer(frames, dtype=np.uint8)
+            indices = get_randomized_indices(perm_key, len(arr_frames))
+            idx = indices[start_bit : start_bit + num_bits]
+            extracted = arr_frames[idx] & 1
+            return (extracted.astype(np.uint8) + 48).tobytes().decode("ascii")
+        else:
+            sampwidth = params.sampwidth
+            slots = len(frames) // sampwidth
+            if start_bit + num_bits > slots:
+                raise ValueError("Not enough space to extract bits")
+            indices = get_randomized_indices(perm_key, slots)
+            idx = indices[start_bit : start_bit + num_bits]
+            byte_indices = idx * sampwidth
+            arr_frames = np.frombuffer(frames, dtype=np.uint8)
+            extracted = arr_frames[byte_indices] & 1
+            return (extracted.astype(np.uint8) + 48).tobytes().decode("ascii")
+
+    def embed_segments(self, media_bytes: bytes, segments: list[tuple[int, str]], perm_key: str) -> bytes:
+        frames, params = self._load(media_bytes)
+        arr_frames = np.frombuffer(frames, dtype=np.uint8).copy()
+        sampwidth = params.sampwidth
+        slots = len(arr_frames) // sampwidth
+        indices = get_randomized_indices(perm_key, slots)
+
+        for start_bit, bit_str in segments:
+            bits_arr = np.frombuffer(bit_str.encode("ascii"), dtype=np.uint8) - 48
+            n = len(bits_arr)
+            if start_bit + n > slots:
+                raise ValueError("Data exceeds audio capacity")
+            pos = indices[start_bit : start_bit + n]
+            byte_pos = pos * sampwidth
+            arr_frames[byte_pos] = (arr_frames[byte_pos] & 254) | bits_arr
+
         with io.BytesIO() as out:
             with wave.open(out, 'wb') as wf:
                 wf.setparams(params)
-                wf.writeframes(frames)
+                wf.writeframes(arr_frames.tobytes())
             return out.getvalue()
 
-    def extract_data(self, media_bytes: bytes, key: str, num_bits: int, start_bit: int = 0) -> str:
-        frames, _ = self._load(media_bytes)
-        if start_bit + num_bits > len(frames): raise ValueError("Not enough space to extract bits")
-        indices = get_randomized_indices(key, len(frames))
-        return "".join(str(frames[indices[start_bit + i]] & 1) for i in range(num_bits))
 
 class TextHandler(MediaHandler):
-    def get_capacity(self, media_bytes: bytes) -> int:
-        return 1024 * 1024 * 10  # Arbitrarily large, limited by HTTP body size
+    reserved_bits = 8192
 
-    def embed_data(self, media_bytes: bytes, binary_data: str, key: str, start_bit: int = 0) -> bytes:
-        text = media_bytes.decode('utf-8', errors='ignore')
-        zwcs_in_text = [c for c in text if c in (ZERO_WIDTH_ZERO, ZERO_WIDTH_ONE)]
-        clean_text = "".join([c for c in text if c not in (ZERO_WIDTH_ZERO, ZERO_WIDTH_ONE)])
-        
-        if start_bit + len(binary_data) > len(zwcs_in_text):
-            zwcs_in_text.extend([ZERO_WIDTH_ZERO] * (start_bit + len(binary_data) - len(zwcs_in_text)))
-        
-        for i, b in enumerate(binary_data):
-            zwcs_in_text[start_bit + i] = ZERO_WIDTH_ONE if b == '1' else ZERO_WIDTH_ZERO
-            
-        return (clean_text + "".join(zwcs_in_text)).encode('utf-8')
+    def total_slots(self, media_bytes: bytes) -> int:
+        return 10 * 1024 * 1024
 
-    def extract_data(self, media_bytes: bytes, key: str, num_bits: int, start_bit: int = 0) -> str:
+    def extract_bits(self, media_bytes: bytes, perm_key: str, num_bits: int, start_bit: int, version: int) -> str:
         text = media_bytes.decode('utf-8', errors='ignore')
         zwcs = [c for c in text if c in (ZERO_WIDTH_ZERO, ZERO_WIDTH_ONE)]
-        if start_bit + num_bits > len(zwcs): raise ValueError("Not enough space to extract bits")
-        
-        extracted = zwcs[start_bit:start_bit + num_bits]
-        return "".join(['1' if c == ZERO_WIDTH_ONE else '0' for c in extracted])
+        if start_bit + num_bits > len(zwcs):
+            raise ValueError("Not enough space to extract bits")
+        extracted = zwcs[start_bit : start_bit + num_bits]
+        return "".join('1' if c == ZERO_WIDTH_ONE else '0' for c in extracted)
+
+    def embed_segments(self, media_bytes: bytes, segments: list[tuple[int, str]], perm_key: str) -> bytes:
+        text = media_bytes.decode('utf-8', errors='ignore')
+        clean_text = "".join(c for c in text if c not in (ZERO_WIDTH_ZERO, ZERO_WIDTH_ONE))
+        zwc_list = [c for c in text if c in (ZERO_WIDTH_ZERO, ZERO_WIDTH_ONE)]
+
+        for start_bit, bit_str in segments:
+            req_len = start_bit + len(bit_str)
+            if req_len > len(zwc_list):
+                zwc_list.extend([ZERO_WIDTH_ZERO] * (req_len - len(zwc_list)))
+            for i, b in enumerate(bit_str):
+                zwc_list[start_bit + i] = ZERO_WIDTH_ONE if b == '1' else ZERO_WIDTH_ZERO
+
+        total_zwc = len(zwc_list)
+        parts = clean_text.split(" ")
+        num_spaces = len(parts) - 1
+
+        if num_spaces > 0 and total_zwc > 0:
+            chunk_size = total_zwc // num_spaces
+            out = []
+            ptr = 0
+            for i in range(num_spaces):
+                out.append(parts[i])
+                out.append(" ")
+                if chunk_size > 0:
+                    out.append("".join(zwc_list[ptr : ptr + chunk_size]))
+                    ptr += chunk_size
+            out.append(parts[-1])
+            if ptr < total_zwc:
+                out.append("".join(zwc_list[ptr:]))
+            return "".join(out).encode("utf-8")
+        else:
+            return (clean_text + "".join(zwc_list)).encode("utf-8")
+
 
 def get_media_handler(content_type: str = "", filename: str = "", media_bytes: bytes = b"") -> MediaHandler:
     ct = (content_type or "").lower()
@@ -312,7 +468,6 @@ def get_media_handler(content_type: str = "", filename: str = "", media_bytes: b
     if "text" in ct:
         return TextHandler()
 
-    # Check filename extension
     if any(fn.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp")):
         return ImageHandler()
     if any(fn.endswith(ext) for ext in (".wav", ".mp3", ".ogg", ".m4a", ".flac")):
@@ -320,7 +475,6 @@ def get_media_handler(content_type: str = "", filename: str = "", media_bytes: b
     if any(fn.endswith(ext) for ext in (".txt", ".md", ".json", ".csv", ".log")):
         return TextHandler()
 
-    # Check magic bytes
     if media_bytes:
         if media_bytes.startswith(b'\x89PNG\r\n\x1a\n') or media_bytes.startswith(b'\xff\xd8\xff') or media_bytes.startswith(b'GIF8') or media_bytes.startswith(b'BM'):
             return ImageHandler()
@@ -329,57 +483,49 @@ def get_media_handler(content_type: str = "", filename: str = "", media_bytes: b
 
     return TextHandler()
 
-# --- Additive Steganography logic ---
-def encode_additive(handler, media_bytes: bytes, payload: bytes, key: str, extra_manifest_fields: dict = None) -> bytes:
-    existing_manifest, _ = decode_additive(handler, media_bytes, MANIFEST_KEY, True)
-    manifest = existing_manifest or []
-    key_hash = hashlib.sha256(key.encode('utf-8')).hexdigest()
-    
-    if any(m['key_hash'] == key_hash for m in manifest):
-        # Update existing
-        manifest = [m for m in manifest if m['key_hash'] != key_hash]
-    
-    bin_payload = data_to_binary(encrypt_payload(zlib.compress(payload, level=9), key))
-    start_bit = MANIFEST_RESERVED_BITS if not manifest else manifest[-1]['start_bit'] + manifest[-1]['length_bits']
-    
-    if start_bit + len(bin_payload) > handler.get_capacity(media_bytes) * 8 + MANIFEST_RESERVED_BITS: 
-        raise ValueError("Not enough capacity")
-    
-    entry = {
-        'key_hash': key_hash,
-        'start_bit': start_bit,
-        'length_bits': len(bin_payload),
-        'ts': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    }
-    if extra_manifest_fields:
-        entry.update(extra_manifest_fields)
 
-    manifest.append(entry)
-    
-    bin_manifest = data_to_binary(struct.pack('>I', len(em := encrypt_payload(json.dumps(manifest).encode('utf-8'), MANIFEST_KEY))) + em)
-    if len(bin_manifest) > MANIFEST_RESERVED_BITS: raise ValueError("Manifest too large")
-    
-    media_bytes = handler.embed_data(media_bytes, bin_payload, MANIFEST_KEY, start_bit)
-    return handler.embed_data(media_bytes, bin_manifest, MANIFEST_KEY, 0)
+# --- Core Steganography Functions (v2 & Legacy) ---
+class LegacyFormatError(Exception):
+    pass
 
-def decode_additive(handler, media_bytes: bytes, key: str, manifest_only=False):
+
+def read_manifest(handler: MediaHandler, media_bytes: bytes) -> tuple[Optional[int], Optional[list]]:
+    """Try reading v2 manifest first; if not present, try v1 legacy manifest."""
+    # 1. Try v2
     try:
-        m_len_bits = handler.extract_data(media_bytes, MANIFEST_KEY, MANIFEST_HEADER_LENGTH_BITS, 0)
+        len_bits = handler.extract_bits(media_bytes, V2_PERM_KEY, 32, 0, version=2)
+        L = struct.unpack(">I", binary_to_data(len_bits))[0]
+        if 0 < L * 8 + 32 <= handler.reserved_bits:
+            blob_bits = handler.extract_bits(media_bytes, V2_PERM_KEY, L * 8, 32, version=2)
+            blob = binary_to_data(blob_bits)
+            if blob.startswith(V2_MAGIC):
+                nonce = blob[4:16]
+                ct = blob[16:]
+                json_bytes = AESGCM(V2_MANIFEST_AES_KEY).decrypt(nonce, ct, V2_MAGIC)
+                entries = json.loads(json_bytes.decode('utf-8'))
+                if isinstance(entries, list):
+                    return 2, entries
+    except Exception:
+        pass
+
+    # 2. Try v1 (legacy)
+    try:
+        m_len_bits = handler.extract_bits(media_bytes, LEGACY_MANIFEST_KEY, MANIFEST_HEADER_LENGTH_BITS, 0, version=1)
         m_len = struct.unpack('>I', binary_to_data(m_len_bits))[0]
-        m_bits = handler.extract_data(media_bytes, MANIFEST_KEY, MANIFEST_HEADER_LENGTH_BITS + (m_len * 8), 0)
-        manifest = json.loads(decrypt_payload(binary_to_data(m_bits[MANIFEST_HEADER_LENGTH_BITS:]), MANIFEST_KEY).decode('utf-8'))
-        if manifest_only: return manifest, None
-    except Exception: return None, None
+        if 0 < m_len * 8 + 32 <= MANIFEST_RESERVED_BITS:
+            m_bits = handler.extract_bits(media_bytes, LEGACY_MANIFEST_KEY, MANIFEST_HEADER_LENGTH_BITS + (m_len * 8), 0, version=1)
+            raw_manifest = decrypt_payload(binary_to_data(m_bits[MANIFEST_HEADER_LENGTH_BITS:]), LEGACY_MANIFEST_KEY)
+            manifest = json.loads(raw_manifest.decode('utf-8'))
+            if isinstance(manifest, list):
+                return 1, manifest
+    except Exception:
+        pass
 
-    key_hash = hashlib.sha256(key.encode('utf-8')).hexdigest()
-    secret = next((m for m in manifest if m['key_hash'] == key_hash), None)
-    if not secret: return None, None
-    
-    try:
-        s_bits = handler.extract_data(media_bytes, MANIFEST_KEY, secret['length_bits'], secret['start_bit'])
-        payload = zlib.decompress(decrypt_payload(binary_to_data(s_bits), key))
-    except Exception: return None, None
-    
+    return None, None
+
+
+def parse_payload(payload: bytes) -> tuple[Optional[str], any]:
+    """Parse decrypted uncompressed payload bytes into ('file', (fname, data)) or ('text', msg)."""
     if payload.startswith(MAGIC_BYTES):
         try:
             ptr = len(MAGIC_BYTES)
@@ -387,28 +533,157 @@ def decode_additive(handler, media_bytes: bytes, key: str, manifest_only=False):
             fname = payload[ptr:ptr+flen].decode('utf-8'); ptr += flen
             fsize = struct.unpack('>I', payload[ptr:ptr+4])[0]; ptr += 4
             return "file", (fname, payload[ptr:ptr+fsize])
-        except Exception: pass
-    
+        except Exception:
+            pass
+
     try:
         msg = payload.decode('utf-8', errors='ignore')
-        if (pos := msg.find('\x03')) != -1: return "text", msg[:pos]
+        if (pos := msg.find('\x03')) != -1:
+            return "text", msg[:pos]
         return "text", msg
-    except Exception: pass
+    except Exception:
+        pass
     return None, None
 
-def delete_additive(handler, media_bytes: bytes, key_hash: str) -> bytes:
-    existing_manifest, _ = decode_additive(handler, media_bytes, MANIFEST_KEY, True)
-    if not existing_manifest:
-        return media_bytes
-        
-    new_manifest = [m for m in existing_manifest if m['key_hash'] != key_hash]
-    if len(new_manifest) == len(existing_manifest):
-        return media_bytes # Not found
-        
-    bin_manifest = data_to_binary(struct.pack('>I', len(em := encrypt_payload(json.dumps(new_manifest).encode('utf-8'), MANIFEST_KEY))) + em)
-    if len(bin_manifest) > MANIFEST_RESERVED_BITS: raise ValueError("Manifest too large")
-    
-    return handler.embed_data(media_bytes, bin_manifest, MANIFEST_KEY, 0)
+
+def encode_v2(handler: MediaHandler, media_bytes: bytes, payload: bytes, key: str, meta: Optional[dict] = None) -> bytes:
+    ver, entries = read_manifest(handler, media_bytes)
+    if ver == 1:
+        raise LegacyFormatError("This file was created with an older STENO version. It can still be decoded, but new secrets must go into a fresh cover file.")
+
+    if ver is None or entries is None:
+        entries = []
+
+    scrub_segments = []
+    new_entries = []
+    for entry in entries:
+        salt = base64.b64decode(entry["s"])
+        expected_tag = base64.b64decode(entry["t"])
+        _, id_key_check = derive_v2(key, salt)
+        if hmac.compare_digest(key_tag(id_key_check), expected_tag):
+            rand_bits = ''.join(secrets.choice('01') for _ in range(entry["l"]))
+            scrub_segments.append((entry["b"], rand_bits))
+        else:
+            new_entries.append(entry)
+    entries = new_entries
+
+    salt = os.urandom(16)
+    enc_key, id_key = derive_v2(key, salt)
+    tag = key_tag(id_key)
+
+    nonce = os.urandom(12)
+    compressed = zlib.compress(payload, 9)
+    ct = AESGCM(enc_key).encrypt(nonce, compressed, None)
+    payload_blob = nonce + ct
+    payload_bits = data_to_binary(payload_blob)
+
+    start_bit = max((e["b"] + e["l"] for e in entries), default=handler.reserved_bits)
+    total_slots = handler.total_slots(media_bytes)
+    if start_bit + len(payload_bits) > total_slots:
+        raise ValueError("Not enough capacity")
+
+    new_entry = {
+        "s": base64.b64encode(salt).decode("ascii"),
+        "t": base64.b64encode(tag).decode("ascii"),
+        "b": start_bit,
+        "l": len(payload_bits),
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    if meta:
+        new_entry["meta"] = meta
+    entries.append(new_entry)
+
+    json_bytes = json.dumps(entries).encode("utf-8")
+    m_nonce = os.urandom(12)
+    m_ct = AESGCM(V2_MANIFEST_AES_KEY).encrypt(m_nonce, json_bytes, V2_MAGIC)
+    manifest_blob = V2_MAGIC + m_nonce + m_ct
+    manifest_data = struct.pack(">I", len(manifest_blob)) + manifest_blob
+    manifest_bits = data_to_binary(manifest_data)
+    if len(manifest_bits) > handler.reserved_bits:
+        raise ValueError("Manifest full: too many secrets in this file")
+
+    segments = scrub_segments + [(start_bit, payload_bits), (0, manifest_bits)]
+    return handler.embed_segments(media_bytes, segments, V2_PERM_KEY)
+
+
+def decode_any(handler: MediaHandler, media_bytes: bytes, key: str) -> tuple[Optional[str], any]:
+    ver, entries = read_manifest(handler, media_bytes)
+    if not ver or not entries:
+        return None, None
+
+    if ver == 2:
+        for entry in entries:
+            try:
+                salt = base64.b64decode(entry["s"])
+                expected_tag = base64.b64decode(entry["t"])
+                enc_key, id_key = derive_v2(key, salt)
+                if hmac.compare_digest(key_tag(id_key), expected_tag):
+                    bits = handler.extract_bits(media_bytes, V2_PERM_KEY, entry["l"], entry["b"], version=2)
+                    blob = binary_to_data(bits)
+                    nonce = blob[:12]
+                    ct = blob[12:]
+                    compressed = AESGCM(enc_key).decrypt(nonce, ct, None)
+                    payload = zlib.decompress(compressed)
+                    return parse_payload(payload)
+            except Exception:
+                continue
+        return None, None
+
+    elif ver == 1:
+        key_hash = hashlib.sha256(key.encode('utf-8')).hexdigest()
+        secret = next((m for m in entries if m.get('key_hash') == key_hash), None)
+        if not secret:
+            return None, None
+        try:
+            s_bits = handler.extract_bits(media_bytes, LEGACY_MANIFEST_KEY, secret['length_bits'], secret['start_bit'], version=1)
+            payload = zlib.decompress(decrypt_payload(binary_to_data(s_bits), key))
+            return parse_payload(payload)
+        except Exception:
+            return None, None
+
+    return None, None
+
+
+def delete_v2(handler: MediaHandler, media_bytes: bytes, key: str) -> bytes:
+    ver, entries = read_manifest(handler, media_bytes)
+    if ver == 1:
+        raise LegacyFormatError("This file was created with an older STENO version. It can still be decoded, but new secrets must go into a fresh cover file.")
+    if ver != 2 or not entries:
+        raise HTTPException(404, "Secret not found or invalid key")
+
+    target_entry = None
+    remaining_entries = []
+    for entry in entries:
+        salt = base64.b64decode(entry["s"])
+        expected_tag = base64.b64decode(entry["t"])
+        _, id_key_check = derive_v2(key, salt)
+        if target_entry is None and hmac.compare_digest(key_tag(id_key_check), expected_tag):
+            target_entry = entry
+        else:
+            remaining_entries.append(entry)
+
+    if target_entry is None:
+        raise HTTPException(404, "Secret not found or invalid key")
+
+    rand_bits = ''.join(secrets.choice('01') for _ in range(target_entry["l"]))
+    scrub_segment = (target_entry["b"], rand_bits)
+
+    json_bytes = json.dumps(remaining_entries).encode("utf-8")
+    m_nonce = os.urandom(12)
+    m_ct = AESGCM(V2_MANIFEST_AES_KEY).encrypt(m_nonce, json_bytes, V2_MAGIC)
+    manifest_blob = V2_MAGIC + m_nonce + m_ct
+    manifest_data = struct.pack(">I", len(manifest_blob)) + manifest_blob
+    manifest_bits = data_to_binary(manifest_data)
+
+    segments = [scrub_segment, (0, manifest_bits)]
+    return handler.embed_segments(media_bytes, segments, V2_PERM_KEY)
+
+
+# Backward compatibility aliases
+encode_additive = encode_v2
+decode_additive = decode_any
+delete_additive = delete_v2
+
 
 # --- Auth Middleware / Dependency ---
 async def get_current_user(request: Request):
@@ -419,7 +694,6 @@ async def get_current_user(request: Request):
     
     try:
         if JWT_SECRET:
-            # Note: Depending on Supabase settings, audience is "authenticated"
             payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"], options={"verify_aud": False})
             return payload
         elif supabase:
@@ -428,8 +702,11 @@ async def get_current_user(request: Request):
                 return {"sub": res.user.id, "email": res.user.email}
             raise HTTPException(status_code=401, detail="Invalid token")
         else:
-            # For local dev without Supabase
-            return {"sub": "local_dev_user"}
+            if os.getenv("ALLOW_DEV_AUTH") == "1":
+                return {"sub": "local_dev_user"}
+            raise HTTPException(status_code=500, detail="Auth not configured")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=401, detail=str(e))
 
@@ -477,12 +754,14 @@ async def health_check():
 # ==================== AUTH ENDPOINTS ====================
 
 @app.post("/api/register")
-async def register(body: RegisterRequest):
+@limiter.limit("10/minute")
+async def register(request: Request, body: RegisterRequest):
     """Register a new user via Supabase Auth and insert profile into users table."""
-    if not supabase:
+    if not SUPABASE_URL or not SUPABASE_KEY:
         raise HTTPException(500, "Supabase not configured")
     try:
-        auth_res = supabase.auth.sign_up({
+        req_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        auth_res = req_client.auth.sign_up({
             "email": body.email,
             "password": body.password,
         })
@@ -510,12 +789,14 @@ async def register(body: RegisterRequest):
 
 
 @app.post("/api/token")
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+@limiter.limit("10/minute")
+async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
     """Login with email (username field) and password. Returns JWT access token."""
-    if not supabase:
+    if not SUPABASE_URL or not SUPABASE_KEY:
         raise HTTPException(500, "Supabase not configured")
     try:
-        auth_res = supabase.auth.sign_in_with_password({
+        req_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        auth_res = req_client.auth.sign_in_with_password({
             "email": form_data.username,
             "password": form_data.password,
         })
@@ -588,19 +869,14 @@ async def upload_profile_image(file: UploadFile = File(...), user=Depends(get_cu
         storage_path = f"{user_id}/avatar{ext}"
         file_bytes = await file.read()
 
-        # Upload (upsert) to storage
         supabase.storage.from_('profiles').upload(
             storage_path,
             file_bytes,
             file_options={"content-type": file.content_type or "image/png", "upsert": "true"},
         )
 
-        # Get public URL
         public_url = supabase.storage.from_('profiles').get_public_url(storage_path)
-
-        # Update user record
         supabase.table('users').update({"profile_image": public_url}).eq('id', user_id).execute()
-
         return {"message": "Profile image uploaded", "url": public_url}
     except Exception as e:
         raise HTTPException(400, str(e))
@@ -613,7 +889,6 @@ async def delete_profile_image(user=Depends(get_current_user)):
         raise HTTPException(500, "Supabase not configured")
     try:
         user_id = user['sub']
-        # List files in the user's profile folder and remove them
         files = supabase.storage.from_('profiles').list(user_id)
         if files:
             paths = [f"{user_id}/{f['name']}" for f in files]
@@ -678,13 +953,17 @@ async def enc_text(
         if receiver_name: extra['receiver_name'] = receiver_name
 
         handler = get_media_handler(mf.content_type, mf.filename, media_bytes)
-        b = encode_additive(
-            handler,
-            media_bytes,
-            (message + '\x03').encode('utf-8'),
-            key,
-            extra_manifest_fields=extra if extra else None,
-        )
+        try:
+            b = encode_v2(
+                handler,
+                media_bytes,
+                (message + '\x03').encode('utf-8'),
+                key,
+                meta=extra if extra else None,
+            )
+        except LegacyFormatError as le:
+            raise HTTPException(409, str(le))
+
         mt = 'text/plain' if 'text' in mf.content_type else ('image/png' if 'image' in mf.content_type else 'audio/wav')
         orig_name = mf.filename or "encoded_media"
         stem = orig_name.rsplit(".", 1)[0]
@@ -735,13 +1014,17 @@ async def enc_file(
         p = MAGIC_BYTES + struct.pack(">H", len(sf)) + sf + struct.pack(">I", len(sb)) + sb
 
         handler = get_media_handler(mf.content_type, mf.filename, media_bytes)
-        b = encode_additive(
-            handler,
-            media_bytes,
-            p,
-            key,
-            extra_manifest_fields=extra if extra else None,
-        )
+        try:
+            b = encode_v2(
+                handler,
+                media_bytes,
+                p,
+                key,
+                meta=extra if extra else None,
+            )
+        except LegacyFormatError as le:
+            raise HTTPException(409, str(le))
+
         mt = 'text/plain' if 'text' in mf.content_type else ('image/png' if 'image' in mf.content_type else 'audio/wav')
         orig_name = mf.filename or "encoded_media"
         stem = orig_name.rsplit(".", 1)[0]
@@ -757,7 +1040,9 @@ async def enc_file(
         raise HTTPException(400, str(e))
 
 @app.post("/api/decode")
+@limiter.limit("30/minute")
 async def dec(
+    request: Request,
     media: Optional[UploadFile] = File(None),
     cover_media: Optional[UploadFile] = File(None),
     file: Optional[UploadFile] = File(None),
@@ -767,7 +1052,7 @@ async def dec(
         mf = resolve_media_file(cover_media, file, media)
         media_bytes = await mf.read()
         handler = get_media_handler(mf.content_type, mf.filename, media_bytes)
-        t, data = decode_additive(handler, media_bytes, key)
+        t, data = decode_any(handler, media_bytes, key)
         if t == "file": 
             return Response(content=data[1], headers={'Content-Disposition': f'attachment; filename="{data[0]}"'}, media_type="application/octet-stream")
         if t == "text": 
@@ -779,7 +1064,9 @@ async def dec(
         raise HTTPException(400, str(e))
 
 @app.post("/api/decode-batch")
+@limiter.limit("30/minute")
 async def dec_batch(
+    request: Request,
     media: Optional[UploadFile] = File(None),
     cover_media: Optional[UploadFile] = File(None),
     file: Optional[UploadFile] = File(None),
@@ -810,7 +1097,7 @@ async def dec_batch(
         results = {}
         for key in key_list:
             try:
-                t, data = decode_additive(handler, media_bytes, key)
+                t, data = decode_any(handler, media_bytes, key)
                 if t == "file":
                     results[key] = {"type": "file", "filename": data[0], "data": base64.b64encode(data[1]).decode('utf-8')}
                 elif t == "text":
@@ -832,13 +1119,15 @@ async def del_secret(
     file: Optional[UploadFile] = File(None),
     key: str = Form(...),
 ):
-    """Delete a secret from the media. Accepts raw key, computes key_hash internally."""
+    """Delete a secret from the media (real scrub with random bits)."""
     try:
         mf = resolve_media_file(cover_media, file, media)
         media_bytes = await mf.read()
         handler = get_media_handler(mf.content_type, mf.filename, media_bytes)
-        key_hash = hashlib.sha256(key.encode()).hexdigest()
-        b = delete_additive(handler, media_bytes, key_hash)
+        try:
+            b = delete_v2(handler, media_bytes, key)
+        except LegacyFormatError as le:
+            raise HTTPException(409, str(le))
         mt = 'text/plain' if 'text' in mf.content_type else ('image/png' if 'image' in mf.content_type else 'audio/wav')
         orig_name = mf.filename or "cleaned_media"
         stem = orig_name.rsplit(".", 1)[0]
@@ -852,7 +1141,6 @@ async def del_secret(
         raise
     except Exception as e: 
         raise HTTPException(400, str(e))
-
 
 
 # ==================== KEY STRENGTH & GENERATION ====================
@@ -938,16 +1226,13 @@ async def delete_library_item(item_id: str, user=Depends(get_current_user)):
     if not supabase:
         raise HTTPException(500, "Supabase not configured")
     try:
-        # Get the record first to find the storage path
         res = supabase.table('encoded_images').select('filepath').eq('id', item_id).eq('owner_id', user['sub']).limit(1).execute()
         row = res.data[0] if res.data else None
         if not row:
             raise HTTPException(404, "Item not found")
 
         filepath = row['filepath']
-        # Delete from storage
         supabase.storage.from_('uploads').remove([filepath])
-        # Delete from DB
         supabase.table('encoded_images').delete().eq('id', item_id).eq('owner_id', user['sub']).execute()
 
         return {"message": "Deleted"}
@@ -964,7 +1249,6 @@ async def serve_upload(filename: str):
         raise HTTPException(500, "Supabase not configured")
     try:
         data = supabase.storage.from_('uploads').download(filename)
-        # Determine content type from extension
         ext = os.path.splitext(filename)[1].lower()
         ct_map = {
             '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
@@ -996,7 +1280,6 @@ async def send_email(body: SendEmailRequest, user=Depends(get_current_user)):
         results = []
 
         for recipient_email in body.recipients:
-            # Look up recipient in users table
             res = supabase.table('users').select('id').eq('email', recipient_email).limit(1).execute()
             row = res.data[0] if res.data else None
             if not row:
@@ -1004,7 +1287,6 @@ async def send_email(body: SendEmailRequest, user=Depends(get_current_user)):
                 continue
 
             receiver_id = row['id']
-            # Extract filename from file_path
             stored_filename = os.path.basename(body.file_path)
             message_record = {
                 "id": str(uuid.uuid4()),
@@ -1077,18 +1359,33 @@ async def admin_detect(media: UploadFile = File(...), user=Depends(get_admin_use
     try:
         media_bytes = await media.read()
         handler = get_media_handler(media.content_type, media.filename, media_bytes)
-        manifest, _ = decode_additive(handler, media_bytes, MANIFEST_KEY, manifest_only=True)
+        ver, raw_manifest = read_manifest(handler, media_bytes)
 
-        if not manifest:
-            return {"payloads": [], "message": "No embedded data detected"}
+        if not raw_manifest:
+            return {"payloads": [], "manifest": [], "total_secrets": 0, "message": "No embedded data detected"}
+
+        payloads = []
+        for entry in raw_manifest:
+            norm = {
+                "start_bit": entry.get("b", entry.get("start_bit")),
+                "length_bits": entry.get("l", entry.get("length_bits")),
+                "ts": entry.get("ts"),
+                "format": "v2" if ver == 2 else "v1",
+            }
+            if "meta" in entry and isinstance(entry["meta"], dict):
+                norm.update(entry["meta"])
+            for k, v in entry.items():
+                if k not in ("s", "t", "b", "l", "ts", "key_hash", "start_bit", "length_bits", "meta"):
+                    norm[k] = v
+            payloads.append(norm)
 
         return {
-            "payloads": manifest,
-            "total_secrets": len(manifest),
-            "message": f"Detected {len(manifest)} embedded payload(s)",
+            "payloads": payloads,
+            "manifest": payloads,
+            "total_secrets": len(payloads),
+            "message": f"Detected {len(payloads)} embedded payload(s)",
         }
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(400, str(e))
-
