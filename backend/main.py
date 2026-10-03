@@ -16,6 +16,7 @@ import base64
 import logging
 import functools
 import numpy as np
+import scipy.stats
 from PIL import Image
 
 # Python 3.13 compatibility shim for audioop / pyaudioop
@@ -1140,6 +1141,101 @@ async def del_secret(
     except HTTPException:
         raise
     except Exception as e: 
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/analyze")
+async def analyze_image(
+    media: UploadFile = File(...),
+    cover: Optional[UploadFile] = File(None),
+):
+    """Steganalysis lab: Chi-Square (Westfeld-Pfitzmann), LSB plane visualization, and PSNR."""
+    try:
+        media_bytes = await media.read()
+        try:
+            img = Image.open(io.BytesIO(media_bytes))
+            img.verify()
+            img = Image.open(io.BytesIO(media_bytes))
+        except Exception:
+            raise HTTPException(422, "Analysis supports images only")
+
+        w, h = img.size
+        rgb = np.array(img.convert("RGB"))
+
+        # 1. Chi-square (Westfeld-Pfitzmann) over RGB value histogram
+        h_hist, _ = np.histogram(rgb.reshape(-1), bins=256, range=(0, 256))
+        chi = 0.0
+        used_pairs = 0
+        for k in range(128):
+            e = (h_hist[2 * k] + h_hist[2 * k + 1]) / 2.0
+            if e < 5:
+                continue
+            chi += ((h_hist[2 * k] - e) ** 2) / e
+            used_pairs += 1
+
+        df = used_pairs - 1
+        if df < 1:
+            p = 0.0
+        else:
+            p = float(scipy.stats.chi2.sf(chi, df))
+        p = max(0.0, min(1.0, float(p)))
+
+        if p < 0.3:
+            verdict = "Not detected"
+        elif p < 0.8:
+            verdict = "Suspicious"
+        else:
+            verdict = "Likely stego"
+
+        # 2. LSB plane: (rgb & 1) * 255 as RGB image downscaled with NEAREST so max(w,h) <= 512
+        lsb_arr = ((rgb & 1) * 255).astype(np.uint8)
+        lsb_img = Image.fromarray(lsb_arr, "RGB")
+        max_dim = max(w, h)
+        if max_dim > 512:
+            scale = 512.0 / max_dim
+            new_w = max(1, int(round(w * scale)))
+            new_h = max(1, int(round(h * scale)))
+            lsb_img = lsb_img.resize((new_w, new_h), Image.Resampling.NEAREST)
+
+        out_bio = io.BytesIO()
+        lsb_img.save(out_bio, format="PNG")
+        lsb_plane_png = base64.b64encode(out_bio.getvalue()).decode("ascii")
+
+        # 3. PSNR and changed values percentage (if cover provided with matching dimensions)
+        psnr_db = None
+        changed_values_percent = None
+        if cover is not None:
+            try:
+                cover_bytes = await cover.read()
+                if cover_bytes:
+                    cov_img = Image.open(io.BytesIO(cover_bytes))
+                    if cov_img.size == (w, h):
+                        cov_rgb = np.array(cov_img.convert("RGB"))
+                        diff = rgb.astype(np.float64) - cov_rgb.astype(np.float64)
+                        mse = float(np.mean(diff ** 2))
+                        if mse == 0.0:
+                            psnr_db = 99.0
+                        else:
+                            psnr_db = round(float(10.0 * math.log10((255.0 ** 2) / mse)), 2)
+
+                        changed_count = np.count_nonzero(diff != 0)
+                        total_values = diff.size
+                        changed_values_percent = round(float((changed_count / total_values) * 100.0), 2)
+            except Exception:
+                pass
+
+        return {
+            "chi_square_probability": round(p, 4),
+            "verdict": verdict,
+            "lsb_plane_png": lsb_plane_png,
+            "psnr_db": psnr_db,
+            "changed_values_percent": changed_values_percent,
+            "width": w,
+            "height": h,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
         raise HTTPException(400, str(e))
 
 

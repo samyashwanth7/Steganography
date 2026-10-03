@@ -299,6 +299,44 @@ def test_11_decode_batch(client):
     assert body["results"]["k2"]["message"] == "Batch Message 2"
     assert "error" in body["results"]["nonexistent"]
 
+def test_12_analyze(client):
+    cover = make_random_rgb_png(200, 200)
+    enc_res = client.post(
+        "/api/encode-text",
+        files={"cover_media": ("cover.png", cover, "image/png")},
+        data={"message": "Analyze secret test message", "key": "k-analyze"}
+    )
+    assert enc_res.status_code == 200
+    stego = enc_res.content
+
+    # Call /api/analyze with media and cover
+    res = client.post(
+        "/api/analyze",
+        files={
+            "media": ("stego.png", stego, "image/png"),
+            "cover": ("cover.png", cover, "image/png"),
+        }
+    )
+    assert res.status_code == 200, res.text
+    data = res.json()
+    assert 0.0 <= data["chi_square_probability"] <= 1.0
+    assert data["verdict"] in ("Not detected", "Suspicious", "Likely stego")
+    assert data["psnr_db"] is not None and data["psnr_db"] > 40.0
+    assert data["width"] == 200 and data["height"] == 200
+
+    # Verify lsb_plane_png decodes as valid PNG
+    import base64
+    lsb_bytes = base64.b64decode(data["lsb_plane_png"])
+    lsb_img = Image.open(io.BytesIO(lsb_bytes))
+    assert lsb_img.format == "PNG"
+
+    # Non-image input returns 422
+    non_img = client.post(
+        "/api/analyze",
+        files={"media": ("test.txt", b"plain text is not an image", "text/plain")}
+    )
+    assert non_img.status_code == 422
+
 def test_13_capacity_positive(client):
     cover = make_random_rgb_png(200, 200)
     res = client.post("/api/capacity", files={"cover_media": ("c.png", cover, "image/png")})

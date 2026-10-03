@@ -921,6 +921,12 @@ export default function EncodeTab() {
   const [encoding, setEncoding] = useState(false);
   const [encodeResult, setEncodeResult] = useState<EncodeResult | null>(null);
   const [encodeError, setEncodeError] = useState<string | null>(null);
+  const [qualityReport, setQualityReport] = useState<{
+    psnr_db: number | null;
+    changed_values_percent: number | null;
+    verdict: string;
+    chi_square_probability: number;
+  } | null>(null);
   const [savingToLibrary, setSavingToLibrary] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
@@ -939,6 +945,7 @@ export default function EncodeTab() {
     setCoverType(type);
     setEncodeResult(null);
     setEncodeError(null);
+    setQualityReport(null);
 
     // Create preview URL
     if (type === "image" || type === "audio") {
@@ -1010,6 +1017,7 @@ export default function EncodeTab() {
     setEncoding(true);
     setEncodeError(null);
     setEncodeResult(null);
+    setQualityReport(null);
     setSaveSuccess(false);
 
     try {
@@ -1110,6 +1118,27 @@ export default function EncodeTab() {
         mediaType: coverType,
         previewUrl,
       });
+
+      // Automatically run quality report for images
+      if (coverType === "image" && coverFile) {
+        try {
+          const aForm = new FormData();
+          aForm.append("cover", coverFile);
+          aForm.append("media", currentMediaBlob, currentMediaName);
+          const aRes = await fetch("/api/analyze", { method: "POST", body: aForm });
+          if (aRes.ok) {
+            const aData = await aRes.json();
+            setQualityReport({
+              psnr_db: aData.psnr_db,
+              changed_values_percent: aData.changed_values_percent,
+              verdict: aData.verdict,
+              chi_square_probability: aData.chi_square_probability,
+            });
+          }
+        } catch {
+          // Non-blocking quality report
+        }
+      }
     } catch (err) {
       setEncodeError(
         err instanceof Error ? err.message : "An unexpected error occurred."
@@ -1345,6 +1374,50 @@ export default function EncodeTab() {
                 </div>
               )}
             </div>
+
+            {/* Quality Report Card (for images) */}
+            {qualityReport && (
+              <div className="bg-black/50 border border-white/10 rounded-lg p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-mono font-semibold uppercase text-zinc-300 flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                    Quality &amp; Steganalysis Report
+                  </span>
+                  <span
+                    className={`text-[11px] font-mono px-2 py-0.5 rounded-full border ${
+                      qualityReport.verdict === "Not detected"
+                        ? "bg-emerald-950/40 border-emerald-500/40 text-emerald-400"
+                        : qualityReport.verdict === "Suspicious"
+                        ? "bg-amber-950/40 border-amber-500/40 text-amber-400"
+                        : "bg-red-950/40 border-red-500/40 text-red-400"
+                    }`}
+                  >
+                    {qualityReport.verdict}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2 text-center pt-1">
+                  <div className="bg-zinc-950/60 p-2.5 rounded-md border border-white/5">
+                    <span className="text-[10px] font-mono text-zinc-500 uppercase block">PSNR</span>
+                    <span className="text-xs font-bold font-mono text-white">
+                      {qualityReport.psnr_db !== null ? `${qualityReport.psnr_db} dB` : "N/A"}
+                    </span>
+                  </div>
+                  <div className="bg-zinc-950/60 p-2.5 rounded-md border border-white/5">
+                    <span className="text-[10px] font-mono text-zinc-500 uppercase block">Altered Values</span>
+                    <span className="text-xs font-bold font-mono text-white">
+                      {qualityReport.changed_values_percent !== null ? `${qualityReport.changed_values_percent}%` : "N/A"}
+                    </span>
+                  </div>
+                  <div className="bg-zinc-950/60 p-2.5 rounded-md border border-white/5">
+                    <span className="text-[10px] font-mono text-zinc-500 uppercase block">Chi-Square p</span>
+                    <span className="text-xs font-bold font-mono text-amber-400">
+                      {qualityReport.chi_square_probability.toFixed(3)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Action Buttons */}
             <div className="flex items-center gap-3">

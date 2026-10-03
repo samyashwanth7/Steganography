@@ -7,6 +7,7 @@ import {
   Eraser,
   Library,
   Send,
+  ScanSearch,
   ShieldAlert,
   UserCircle,
   LogOut,
@@ -24,14 +25,16 @@ import DecodeTab from "@/components/DecodeTab";
 import DeleteTab from "@/components/DeleteTab";
 import LibraryTab from "@/components/LibraryTab";
 import SendTab from "@/components/SendTab";
+import AnalyzeTab from "@/components/AnalyzeTab";
 import Link from "next/link";
 
 const tabs = [
   { id: "encode", label: "Encode", subtitle: "Multi-Payload Embedding", icon: Lock },
   { id: "decode", label: "Decode", subtitle: "Extract & Reveal", icon: Unlock },
   { id: "delete", label: "Scrub", subtitle: "Surgical Erasure", icon: Eraser },
+  { id: "analyze", label: "Analyze", subtitle: "Steganalysis Lab", icon: ScanSearch },
   { id: "library", label: "Vault", subtitle: "Cloud Encoded Media", icon: Library },
-  { id: "send", label: "Transfer", subtitle: "Secure File Dispatch", icon: Send },
+  { id: "send", label: "Share", subtitle: "Send to STENO inbox", icon: Send },
 ];
 
 export default function DashboardPage() {
@@ -70,9 +73,9 @@ export default function DashboardPage() {
           </span>
           <span>ENGINE ACTIVE</span>
           <span className="text-zinc-600">•</span>
-          <span>AES-256-CBC</span>
+          <span>AES-256-GCM</span>
           <span className="text-zinc-600">•</span>
-          <span>32K MANIFEST</span>
+          <span>SCRYPT KDF</span>
         </div>
 
         {/* Right Actions */}
@@ -188,7 +191,7 @@ export default function DashboardPage() {
       {/* Main Studio Panel */}
       <div className="steno-card overflow-hidden">
         {/* Navigation Tabs */}
-        <div className="grid grid-cols-2 sm:grid-cols-5 border-b border-white/[0.08] bg-black/40">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 border-b border-white/[0.08] bg-black/40">
           {tabs.map((tab) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
@@ -233,6 +236,7 @@ export default function DashboardPage() {
               {activeTab === "encode" && <EncodeTab />}
               {activeTab === "decode" && <DecodeTab />}
               {activeTab === "delete" && <DeleteTab />}
+              {activeTab === "analyze" && <AnalyzeTab />}
               {activeTab === "library" && <LibraryTab />}
               {activeTab === "send" && <SendTab />}
             </motion.div>

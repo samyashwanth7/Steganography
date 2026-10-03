@@ -215,11 +215,11 @@ export default function SendTab() {
       {/* Header */}
       <div className="flex items-center gap-3 mb-2">
         <Send className="w-6 h-6 text-red-500" />
-        <h2 className="text-xl font-semibold">Secure File Transfer</h2>
+        <h2 className="text-xl font-semibold">Share</h2>
       </div>
 
       <p className="text-sm text-gray-400">
-        Send encrypted carrier files directly to other users via email.
+        Send encrypted carrier files directly to other users&apos; STENO inbox.
       </p>
 
       <AnimatePresence mode="wait">
@@ -240,9 +240,9 @@ export default function SendTab() {
               <CheckCircle2 className="w-16 h-16 text-green-400" />
             </motion.div>
             <div>
-              <h3 className="text-xl font-bold text-green-400 mb-1">File Sent Successfully!</h3>
+              <h3 className="text-xl font-bold text-green-400 mb-1">File Shared Successfully!</h3>
               <p className="text-gray-400 text-sm">
-                Your encrypted file has been sent to {validRecipients.length} recipient
+                Your encrypted carrier file has been delivered to {validRecipients.length} STENO inbox recipient
                 {validRecipients.length > 1 ? "s" : ""}.
               </p>
             </div>
@@ -251,7 +251,7 @@ export default function SendTab() {
               className="btn-secondary flex items-center gap-2 px-6 py-3 mt-2"
             >
               <Send className="w-4 h-4" />
-              Send Another File
+              Share Another File
             </button>
           </motion.div>
         ) : (
