@@ -451,6 +451,27 @@ async def limit_size(req: Request, call_next):
     return await call_next(req)
 
 
+# ==================== SYSTEM & HEALTH ENDPOINTS ====================
+
+@app.get("/")
+async def root():
+    return {
+        "status": "online",
+        "service": "STENO Cryptographic API",
+        "version": "2.4.0",
+        "documentation": "/docs"
+    }
+
+@app.get("/health")
+@app.get("/api/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "engine": "active",
+        "ciphers": ["AES-256-CBC", "HMAC-SHA-256"]
+    }
+
+
 # ==================== AUTH ENDPOINTS ====================
 
 @app.post("/api/register")
