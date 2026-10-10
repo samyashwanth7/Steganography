@@ -32,6 +32,7 @@ export default function LandingPage() {
   // Interactive LSB Simulator State
   const [simulatorSecret, setSimulatorSecret] = useState("TOP_SECRET_SIGMA_9");
   const [lsbBits, setLsbBits] = useState(1);
+  const [amplifyDiff, setAmplifyDiff] = useState(false);
   const [showZwcDebug, setShowZwcDebug] = useState(false);
   const [copiedZwc, setCopiedZwc] = useState(false);
 
@@ -152,6 +153,77 @@ export default function LandingPage() {
     .slice(0, 4)
     .map((c) => c.charCodeAt(0).toString(2).padStart(8, "0"))
     .join(" ");
+
+  // Base vibrant pixels to demonstrate LSB alterations
+  const BASE_PIXELS = [
+    { name: "P1", label: "Coral Red", r: 228, g: 68, b: 86 },
+    { name: "P2", label: "Emerald Green", r: 42, g: 185, b: 120 },
+    { name: "P3", label: "Warm Amber", r: 240, g: 155, b: 35 },
+    { name: "P4", label: "Royal Violet", r: 125, g: 80, b: 235 },
+  ];
+
+  // Raw secret bitstream for simulation
+  const rawSecretBits = (simulatorSecret.length > 0 ? simulatorSecret : "STENO")
+    .split("")
+    .map((c) => c.charCodeAt(0).toString(2).padStart(8, "0"))
+    .join("");
+
+  // Simulated pixel alterations per channel
+  const simulatedPixels = BASE_PIXELS.map((p, pIdx) => {
+    const mask = (1 << lsbBits) - 1;
+    const channels = (["r", "g", "b"] as const).map((ch, chIdx) => {
+      const origVal = p[ch];
+      const bitStart = ((pIdx * 3 + chIdx) * lsbBits) % Math.max(rawSecretBits.length, 1);
+      let bitsToInject = rawSecretBits.slice(bitStart, bitStart + lsbBits);
+      if (bitsToInject.length < lsbBits) {
+        bitsToInject = (bitsToInject + rawSecretBits).slice(0, lsbBits);
+      }
+      const injectedVal = parseInt(bitsToInject || "0", 2);
+      const stegoVal = (origVal & ~mask) | (injectedVal & mask);
+      const delta = stegoVal - origVal;
+
+      const origBin = origVal.toString(2).padStart(8, "0");
+      const stegoBin = stegoVal.toString(2).padStart(8, "0");
+      const prefixBin = origBin.slice(0, 8 - lsbBits);
+      const injectedBin = stegoBin.slice(8 - lsbBits);
+
+      return {
+        name: ch.toUpperCase(),
+        origVal,
+        stegoVal,
+        delta,
+        prefixBin,
+        injectedBin,
+      };
+    });
+
+    const origColor = `rgb(${p.r}, ${p.g}, ${p.b})`;
+    const stegoColor = `rgb(${channels[0].stegoVal}, ${channels[1].stegoVal}, ${channels[2].stegoVal})`;
+
+    // Difference amplified color for contrast demonstration
+    const ampR = Math.min(255, Math.max(0, 128 + channels[0].delta * 35));
+    const ampG = Math.min(255, Math.max(0, 128 + channels[1].delta * 35));
+    const ampB = Math.min(255, Math.max(0, 128 + channels[2].delta * 35));
+    const ampColor = `rgb(${ampR}, ${ampG}, ${ampB})`;
+
+    const avgPixelDelta = (
+      (Math.abs(channels[0].delta) + Math.abs(channels[1].delta) + Math.abs(channels[2].delta)) /
+      (3 * 255) * 100
+    );
+
+    return {
+      ...p,
+      channels,
+      origColor,
+      stegoColor,
+      ampColor,
+      avgPixelDelta,
+    };
+  });
+
+  const overallAvgDelta = (
+    simulatedPixels.reduce((acc, p) => acc + p.avgPixelDelta, 0) / simulatedPixels.length
+  ).toFixed(2);
 
   return (
     <main ref={containerRef} className="relative min-h-screen bg-[#040406] text-zinc-100 overflow-x-hidden selection:bg-red-500/30 selection:text-white">
@@ -332,16 +404,36 @@ export default function LandingPage() {
                 <input
                   type="range"
                   min="1"
-                  max="4"
+                  max="6"
                   value={lsbBits}
                   onChange={(e) => setLsbBits(Number(e.target.value))}
                   className="w-full accent-red-500 cursor-pointer"
                 />
-                <div className="flex justify-between text-[11px] text-zinc-500 font-mono mt-1">
-                  <span>1 Bit (100% Invisible)</span>
-                  <span>2 Bits (High Cap)</span>
-                  <span>4 Bits (Extreme)</span>
+                <div className="flex justify-between text-[10px] text-zinc-500 font-mono mt-1">
+                  <span className={lsbBits === 1 ? "text-emerald-400 font-bold" : ""}>1 Bit (Invisible)</span>
+                  <span className={lsbBits === 2 ? "text-amber-400 font-bold" : ""}>2 Bits (Optimal)</span>
+                  <span className={lsbBits === 4 ? "text-orange-400 font-bold" : ""}>4 Bits (Noise)</span>
+                  <span className={lsbBits === 6 ? "text-red-400 font-bold" : ""}>6 Bits (Corrupted)</span>
                 </div>
+              </div>
+
+              <div className="flex items-center justify-between p-3.5 rounded-xl bg-black/50 border border-white/5">
+                <div className="space-y-0.5">
+                  <span className="text-xs font-semibold text-zinc-200 block">Magnify Difference (50x)</span>
+                  <span className="text-[10px] text-zinc-500 block">Amplify the microscopic delta for human eyes</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setAmplifyDiff(!amplifyDiff)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all flex items-center gap-1.5 ${
+                    amplifyDiff
+                      ? "bg-amber-500/20 text-amber-300 border-amber-500/50 shadow-[0_0_15px_rgba(245,158,11,0.2)]"
+                      : "bg-white/[0.04] text-zinc-400 border-white/10 hover:border-white/20"
+                  }`}
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>{amplifyDiff ? "Amplified ON" : "Natural View"}</span>
+                </button>
               </div>
 
               <div className="p-4 rounded-xl bg-black/50 border border-white/5 space-y-2 font-mono text-xs">
@@ -356,39 +448,98 @@ export default function LandingPage() {
             </div>
 
             {/* Right: Live Simulated Pixel Block */}
-            <div className="p-6 rounded-2xl bg-zinc-950/80 border border-white/10 space-y-6">
+            <div className="p-6 rounded-2xl bg-zinc-950/80 border border-white/10 space-y-5">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-mono text-zinc-400 uppercase tracking-wider flex items-center gap-2">
                   <Cpu className="w-4 h-4 text-red-400" />
                   Live Pixel Decomposition
                 </span>
-                <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                  DELTA &lt; 0.4%
+                <span
+                  className={`text-[11px] font-mono px-2 py-0.5 rounded border ${
+                    Number(overallAvgDelta) < 1.0
+                      ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                      : Number(overallAvgDelta) < 10.0
+                      ? "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                      : "bg-red-500/10 text-red-400 border-red-500/20"
+                  }`}
+                >
+                  DELTA &asymp; {overallAvgDelta}%
                 </span>
               </div>
 
-              {/* Simulated 4-Pixel Cluster */}
-              <div className="grid grid-cols-4 gap-2.5">
-                {[1, 2, 3, 4].map((px) => (
-                  <div key={px} className="p-3 rounded-xl bg-black/60 border border-white/5 text-center space-y-2">
-                    <div
-                      className="w-full h-12 rounded-lg shadow-inner border border-white/10 transition-colors"
-                      style={{
-                        backgroundColor: px % 2 === 0 ? "#1c2438" : "#241829",
-                      }}
-                    />
-                    <span className="text-[10px] font-mono text-zinc-500 block">P{px} (RGBA)</span>
-                    <div className="text-[9px] font-mono text-left space-y-0.5 text-zinc-400">
-                      <div>R: ...{simulatorSecret ? (px * 3) % 2 : 0}</div>
-                      <div>G: ...{simulatorSecret ? (px * 7) % 2 : 1}</div>
-                      <div>B: ...{simulatorSecret ? (px * 5) % 2 : 0}</div>
+              {/* Simulated 4-Pixel Cluster with Split Swatch */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                {simulatedPixels.map((p) => (
+                  <div key={p.name} className="p-3 rounded-xl bg-black/60 border border-white/5 space-y-2.5">
+                    {/* Split Swatch: Left = Cover, Right = Stego / Amplified */}
+                    <div className="relative w-full h-14 rounded-lg overflow-hidden border border-white/10 shadow-inner flex">
+                      <div
+                        className="w-1/2 h-full relative"
+                        style={{ backgroundColor: p.origColor }}
+                        title={`Cover: ${p.origColor}`}
+                      >
+                        <span className="absolute bottom-0.5 left-1 text-[8px] font-mono text-white/70 bg-black/40 px-1 rounded">
+                          Cover
+                        </span>
+                      </div>
+                      <div
+                        className="w-1/2 h-full relative transition-colors duration-200"
+                        style={{ backgroundColor: amplifyDiff ? p.ampColor : p.stegoColor }}
+                        title={`Stego: ${p.stegoColor}`}
+                      >
+                        <span className="absolute bottom-0.5 right-1 text-[8px] font-mono text-white/70 bg-black/40 px-1 rounded">
+                          {amplifyDiff ? "Amp" : "Stego"}
+                        </span>
+                      </div>
+                      {/* Center Divider line */}
+                      <div className="absolute inset-y-0 left-1/2 w-[1px] bg-black/40" />
+                    </div>
+
+                    <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400">
+                      <span className="font-semibold text-zinc-300">{p.name}</span>
+                      <span className="text-[9px] text-zinc-500">{p.label}</span>
+                    </div>
+
+                    {/* RGB Bit Inspector */}
+                    <div className="space-y-1 text-[9px] font-mono text-zinc-400 border-t border-white/5 pt-1.5">
+                      {p.channels.map((ch) => (
+                        <div key={ch.name} className="flex items-center justify-between">
+                          <span className="text-zinc-500">{ch.name}: {ch.origVal}&rarr;{ch.stegoVal}</span>
+                          <span className="tracking-tight">
+                            <span className="text-zinc-600">{ch.prefixBin}</span>
+                            <span className="text-amber-400 font-bold bg-amber-500/10 px-0.5 rounded">
+                              {ch.injectedBin}
+                            </span>
+                          </span>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 ))}
               </div>
 
-              <div className="text-xs text-zinc-400 leading-relaxed font-light">
-                Notice: The LSB modifications alter the color value by less than 1/256th of an RGB step. To the human visual cortex, the original and stego image are mathematically indistinguishable.
+              {/* Educational Perception Callout */}
+              <div className="p-3.5 rounded-xl bg-white/[0.02] border border-white/5 text-xs text-zinc-400 leading-relaxed font-light">
+                {lsbBits === 1 && !amplifyDiff && (
+                  <p>
+                    <strong className="text-emerald-400 font-medium">Why can&apos;t you see color changes?</strong> At 1 bit per subpixel, the RGB value changes by at most &plusmn;1 out of 255 (&Delta; &lt; 0.4%). The human visual cortex cannot detect variations below ~1.5%. Drag the slider to <strong className="text-amber-400 font-mono">4 or 6 bits</strong> to see visible distortion, or click <strong className="text-amber-400">Magnify Difference</strong> above!
+                  </p>
+                )}
+                {lsbBits === 1 && amplifyDiff && (
+                  <p>
+                    <strong className="text-amber-400 font-medium">50x Amplification Active:</strong> The microscopic 1-bit differences are mathematically magnified by 50x so human eyes can inspect which subpixels received secret data.
+                  </p>
+                )}
+                {lsbBits >= 2 && lsbBits <= 3 && (
+                  <p>
+                    <strong className="text-amber-400 font-medium">Balanced Capacity Zone:</strong> Embedding 2–3 bits offers 2x–3x more payload storage. Color variance remains negligible (&Delta; &le; 1.2%) for photographic textures, but may exhibit slight noise on smooth gradients.
+                  </p>
+                )}
+                {lsbBits >= 4 && (
+                  <p>
+                    <strong className="text-red-400 font-medium">Visible Distortion Detected:</strong> Notice how the right half of the swatch visibly deviates from the cover! At 4–6 bits (&Delta; &gt; 6%), aggressive color shifting and pixel artifacts become immediately apparent.
+                  </p>
+                )}
               </div>
             </div>
           </div>
