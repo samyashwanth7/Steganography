@@ -336,7 +336,7 @@ export default function LandingPage() {
           className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-20 w-full"
         >
           <MetricCard title="32,768 Bits" subtitle="Encrypted Manifest System" tag="4x Capacity" />
-          <MetricCard title="AES-256-CBC" subtitle="PBKDF2 Cryptographic Salt" tag="NSA Approved" />
+          <MetricCard title="AES-256-GCM" subtitle="scrypt Cryptographic KDF" tag="NSA Approved" />
           <MetricCard title="0.00% Error" subtitle="Perceptual Invariance Delta" tag="Invisible" />
           <MetricCard title="3 Media Types" subtitle="Pixel, Audio & Invisible Text" tag="Multi-Engine" />
         </motion.div>
@@ -355,7 +355,7 @@ export default function LandingPage() {
           <span>•</span>
           <span>// FORENSIC MANIFEST DETECTOR</span>
           <span>•</span>
-          <span>// AES-256-CBC HARDENED CIPHERS</span>
+          <span>// AES-256-GCM HARDENED CIPHERS</span>
           <span>•</span>
           <span>// ZERO AUDIBLE DISTORTION</span>
           <span>•</span>
